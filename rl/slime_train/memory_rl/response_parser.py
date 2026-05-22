@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import ast
 import json
+import logging
 import re
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 def strip_think_wrapper(response: str) -> str:
@@ -45,18 +49,209 @@ def try_parse_json(text: str) -> dict | None:
     return None
 
 
+# ---------------------------------------------------------------------------
+# Qwen3 Coder XML tool-call parser
+# ---------------------------------------------------------------------------
+# Adapted from sglang Qwen3CoderDetector (sglang/srt/function_call/qwen3_coder_detector.py)
+#
+# Qwen3.6 chat_template produces tool calls in this format:
+#
+#   <tool_call>
+#   <function=function_name>
+#   <parameter=param_name>
+#   value
+#   </parameter>
+#   <parameter=param2>
+#   value2
+#   </parameter>
+#   </function>
+#   </tool_call>
+#
+# Multiple tool_call blocks may appear in one response.
+
+# Regex patterns from sglang Qwen3CoderDetector
+_TOOL_CALL_RE = re.compile(r"<tool_call>(.*?)</tool_call>", re.DOTALL)
+_FUNCTION_RE = re.compile(
+    r"<function=(.*?)</function>|<function=(.*)$", re.DOTALL
+)
+_PARAMETER_RE = re.compile(
+    r"<parameter=(.*?)(?:</parameter>|(?=<parameter=)|(?=</function>)|$)",
+    re.DOTALL,
+)
+
+# Tool schema registry for type-aware parameter conversion (optional)
+_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {}
+
+
+def set_tool_schemas(tools: list[dict[str, Any]] | None) -> None:
+    """Register tool schemas for type-aware parameter parsing.
+
+    Call this once at generate startup with the tools list from metadata.
+    """
+    global _TOOL_SCHEMAS
+    _TOOL_SCHEMAS = {}
+    if not tools:
+        return
+    for tool in tools:
+        func = tool.get("function") or tool
+        name = func.get("name", "")
+        params = func.get("parameters", {})
+        if isinstance(params, dict) and "properties" in params:
+            _TOOL_SCHEMAS[name] = params["properties"]
+        elif isinstance(params, dict):
+            _TOOL_SCHEMAS[name] = params
+
+
+def _get_param_config(func_name: str) -> dict[str, Any]:
+    """Get parameter schema for a function."""
+    return _TOOL_SCHEMAS.get(func_name, {})
+
+
+def _convert_param_value(param_value: str, param_name: str, param_config: dict, func_name: str) -> Any:
+    """Convert parameter value based on its type in the schema.
+
+    Logic adapted from sglang Qwen3CoderDetector._convert_param_value.
+    """
+    # Handle null value for any type
+    if param_value.lower() == "null":
+        return None
+
+    if param_name not in param_config:
+        # No schema info, try to infer type
+        return _maybe_json_value(param_value)
+
+    if isinstance(param_config[param_name], dict) and "type" in param_config[param_name]:
+        param_type = str(param_config[param_name]["type"]).strip().lower()
+    else:
+        param_type = "string"
+
+    if param_type in ("string", "str", "text", "varchar", "char", "enum"):
+        return param_value
+    elif param_type.startswith("int") or param_type.startswith("uint") or param_type.startswith("long"):
+        try:
+            return int(param_value)
+        except (ValueError, TypeError):
+            logger.debug(f"Cannot convert '{param_value}' to int for {func_name}.{param_name}")
+            return param_value
+    elif param_type.startswith("num") or param_type.startswith("float"):
+        try:
+            val = float(param_value)
+            if val.is_integer() and "." not in param_value:
+                return int(val)
+            return val
+        except (ValueError, TypeError):
+            return param_value
+    elif param_type in ("boolean", "bool"):
+        return param_value.lower() == "true"
+    elif param_type in ("object", "array", "arr") or param_type.startswith("dict") or param_type.startswith("list"):
+        try:
+            return json.loads(param_value)
+        except (json.JSONDecodeError, ValueError):
+            try:
+                return ast.literal_eval(param_value)
+            except (ValueError, SyntaxError):
+                return param_value
+    else:
+        return _maybe_json_value(param_value)
+
+
+def _maybe_json_value(value: str) -> Any:
+    """Try to parse a parameter value as JSON; fall back to raw string."""
+    value = value.strip()
+    if not value:
+        return value
+    if value[0] in "[{\"" or value in {"true", "false", "null"}:
+        try:
+            return json.loads(value)
+        except (json.JSONDecodeError, ValueError):
+            return value
+    # Try numeric
+    try:
+        if "." in value:
+            return float(value)
+        return int(value)
+    except (ValueError, TypeError):
+        pass
+    return value
+
+
+def _parse_qwen_tool_calls(text: str) -> list[dict[str, Any]]:
+    """Parse Qwen3 Coder-style XML ``<tool_call><function=...>`` blocks.
+
+    Logic adapted from sglang Qwen3CoderDetector.detect_and_parse().
+    Returns a list of ``{"tool": name, "arguments": {...}}`` dicts.
+    """
+    if "<tool_call>" not in text:
+        return []
+
+    results: list[dict[str, Any]] = []
+    raw_tool_calls = _TOOL_CALL_RE.findall(text)
+    if not raw_tool_calls:
+        # Fallback: maybe the whole text is inside the tag or tags are stripped
+        if "<function=" in text:
+            raw_tool_calls = [text]
+
+    for tool_content in raw_tool_calls:
+        # Find function calls
+        funcs = _FUNCTION_RE.findall(tool_content)
+        for func_match in funcs:
+            func_body = func_match[0] or func_match[1]
+            if ">" not in func_body:
+                continue
+
+            name_end = func_body.index(">")
+            func_name = func_body[:name_end].strip()
+            params_str = func_body[name_end + 1:]
+
+            param_config = _get_param_config(func_name)
+            parsed_params: dict[str, Any] = {}
+
+            for p_match in _PARAMETER_RE.findall(params_str):
+                if ">" not in p_match:
+                    continue
+                p_idx = p_match.index(">")
+                p_name = p_match[:p_idx].strip()
+                p_val = p_match[p_idx + 1:]
+                # Remove prefixing and trailing \n (same as sglang)
+                if p_val.startswith("\n"):
+                    p_val = p_val[1:]
+                if p_val.endswith("\n"):
+                    p_val = p_val[:-1]
+
+                parsed_params[p_name] = _convert_param_value(
+                    p_val, p_name, param_config, func_name
+                )
+
+            results.append({"tool": func_name, "arguments": parsed_params})
+
+    return results
+
+
 def parse_tool_calls_response(response: str) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
     """Parse policy output into a list of ``{tool, arguments}`` calls.
 
-    Supported payloads:
-    - ``{"tool_calls": [{"tool": "fs_write", "arguments": {...}}]}``
-    - ``{"operations": [...]}``
-    - ``{"fs_ops": [...], "vec_ops": [...], "graph_ops": [...]}``
+    Supported payloads (checked in order):
+    1. Qwen3 Coder XML format: ``<tool_call><function=...><parameter=...>...</function></tool_call>``
+       (uses sglang Qwen3CoderDetector regex patterns)
+    2. JSON: ``{"tool_calls": [{"tool": "fs_write", "arguments": {...}}]}``
+    3. JSON: ``{"operations": [...]}``
+    4. JSON: ``{"fs_ops": [...], "vec_ops": [...], "graph_ops": [...]}``
     """
+    text = response.strip() if response else ""
+
+    # Strip thinking content first for all formats
+    clean_text = strip_think_wrapper(response) if response else ""
+
+    # 1. Try Qwen3 Coder XML format (check both raw and think-stripped text)
+    qwen_calls = _parse_qwen_tool_calls(text) or _parse_qwen_tool_calls(clean_text)
+    if qwen_calls:
+        return qwen_calls, {"tool_calls": qwen_calls, "_format": "qwen3_coder_xml"}
+
+    # 2. Try JSON formats
     # 优先直接解析（避免 strip_think_wrapper 误截含 </think> 文本的合法 JSON）
-    parsed = try_parse_json(response.strip() if response else "")
+    parsed = try_parse_json(text)
     if parsed is None:
-        parsed = try_parse_json(strip_think_wrapper(response))
+        parsed = try_parse_json(clean_text)
     if parsed is None:
         return [], None
 
@@ -99,7 +294,7 @@ def _normalize_call(call: Any) -> dict[str, Any]:
 
 
 def format_reward(response: str) -> float:
-    """Lightweight structural reward for JSON tool-call outputs."""
+    """Lightweight structural reward for tool-call outputs (JSON or Qwen XML)."""
     calls, parsed = parse_tool_calls_response(response)
     if parsed is None:
         return 0.0
@@ -107,9 +302,18 @@ def format_reward(response: str) -> float:
     if calls:
         score += 0.3
     valid_tools = {
-        "fs_write", "vec_write", "graph_write", "finish",
-        "fs_append", "fs_delete", "vec_add", "vec_delete",
-        "graph_add_node", "graph_add_edge", "graph_delete_node", "graph_delete_edge",
+        # Ingest tools (read + write)
+        "fs_grep", "fs_bm25_search", "fs_read_file", "fs_read_lines", "fs_tree",
+        "vec_search", "vec_search_all", "graph_search_nodes", "fs_execute_bash",
+        "fs_write", "fs_append", "fs_update_line", "fs_update_meta",
+        "vec_add", "graph_add_node", "graph_add_edge",
+        # Retrieve tools
+        "vec_semantic_search", "graph_entity_search", "submit",
+        # Consolidate tools (superset of ingest write)
+        "fs_delete", "vec_delete", "graph_delete_node", "graph_delete_edge",
+        "vec_write", "graph_write",
+        # Shared
+        "finish",
     }
     well_formed = 0
     for call in calls:
@@ -117,6 +321,6 @@ def format_reward(response: str) -> float:
             well_formed += 1
     if calls:
         score += 0.3 * (well_formed / len(calls))
-    if any(call.get("tool") == "finish" for call in calls):
+    if any(call.get("tool") in {"finish", "submit"} for call in calls):
         score += 0.1
     return min(score, 1.0)

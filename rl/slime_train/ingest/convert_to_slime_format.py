@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
-"""Convert T3 ingest snapshot data to Slime JSONL format.
+"""Convert ingest snapshot data to Slime JSONL format (task_loop mode).
 
-Input is the ingest snapshot dataset layout produced by
-``src/data_gen/ingest_snapshot/run_generate.py``. Each sample asks the policy
-to emit JSON-serialized T3 ingest tool calls for ``pending_messages``. Reward
-uses hidden query probes selected from ``probes_by_task.ingest`` when available.
+When ``MEMORY_RL_APPLY_MODE=task_loop``, the custom_generate function delegates
+to ``IngestT2AgentLoopTask.run()`` which constructs the system prompt, user prompt,
+and tools INTERNALLY from the snapshot + metadata. Therefore the dataset only needs
+to provide the MINIMAL input:
+  - prompt: the pending_messages (conversation to ingest)
+  - metadata: snapshot_id, traj_id, session_time, pending_messages, probes, etc.
+
+The ``prompt`` field is a simple list of messages representing the conversation
+to process. The task loop will build the full agent loop prompt at generate time.
 """
 
 from __future__ import annotations
@@ -16,7 +21,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-_WORKSPACE_ROOT = Path(__file__).resolve().parents[2]
+_WORKSPACE_ROOT = Path(__file__).resolve().parents[3]
 if str(_WORKSPACE_ROOT) not in sys.path:
     sys.path.insert(0, str(_WORKSPACE_ROOT))
 
@@ -24,119 +29,55 @@ from llm_gateway.rl.slime_train.memory_rl.paths import ensure_workspace_paths
 
 ensure_workspace_paths(__file__)
 
-from llm_gateway.rl.slime_train._t3_assets import INGEST_T3_SYSTEM_PROMPT, INGEST_T3_TOOLS
-from llm_gateway.rl.rl_env.snapshot_session import SnapshotSession
+from llm_gateway.atomic_t2_agent_loop.ingest_task import (
+    INGEST_T2_AGENT_TOOLS,
+)
 from llm_gateway.rl.slime_train.memory_rl.probes import select_task_probes
 
-OUTPUT_INSTRUCTION = """
 
-## RL Output Format
+def convert_record(record: dict[str, Any]) -> dict[str, Any]:
+    """Convert a single ingest record to Slime training format.
 
-You cannot call native tools in this training environment. Instead, output one
-JSON object only, after any private reasoning:
-
-{
-  "tool_calls": [
-    {"tool": "fs_write", "arguments": {"action": "add_file|append|update:<line>|update_meta", "path": "...", "content": "..."}},
-    {"tool": "vec_write", "arguments": {"action": "add|update:<id>", "collection": "...", "text": "...", "entry_type": "fact|event|preference|insight"}},
-    {"tool": "graph_write", "arguments": {"action": "add_node", "node_id": "...", "label": "..."}},
-    {"tool": "graph_write", "arguments": {"action": "add_edge", "source": "...", "target": "...", "relation": "..."}},
-    {"tool": "finish", "arguments": {"summary": "..."}}
-  ]
-}
-
-Your writes will be evaluated by hidden query probes after ingest. Store enough
-faithful evidence from the conversation for future retrieval, and do not invent
-facts beyond the provided messages.
-"""
-
-
-def summarize_env(loaded) -> str:
-    """Build a compact current-memory summary from a loaded snapshot."""
-    fs_files = loaded.fs.list_files()
-    parts = ["## Current Memory State", "", "### File System Structure:", loaded.fs.tree(max_depth=3)]
-    if fs_files:
-        parts.extend(["", "### File Contents Preview:"])
-        for path in fs_files[:12]:
-            content = loaded.fs.read_file(path)
-            if len(content) > 1200:
-                content = content[:1200] + "\n... (truncated)"
-            parts.append(f"\n#### {path}\n{content}")
-    else:
-        parts.extend(["", "### File Contents Preview:", "(no files)"])
-    parts.extend([
-        "",
-        "### Vector DB Stats:",
-        json.dumps(loaded.vec.get_stats(), ensure_ascii=False),
-        "",
-        "### Graph DB Stats:",
-        json.dumps(loaded.graph.get_stats(), ensure_ascii=False),
-    ])
-    return "\n".join(parts)
-
-
-def format_messages(messages: list[dict[str, Any]]) -> str:
-    lines = []
-    for i, msg in enumerate(messages, 1):
-        role = msg.get("role", "unknown")
-        content = msg.get("content", "")
-        if role == "assistant" and msg.get("tool_calls"):
-            calls = []
-            for tc in msg.get("tool_calls", []):
-                calls.append(f"{tc.get('name', 'tool')}({tc.get('arguments', '')})")
-            content = (content + " " + " ".join(f"[tool_call: {c}]" for c in calls)).strip()
-        elif role == "tool" and msg.get("tool_name"):
-            role = f"tool({msg.get('tool_name')})"
-        lines.append(f"[{i}] {role}: {content}")
-    return "\n".join(lines)
-
-
-def convert_record(record: dict[str, Any], session: SnapshotSession) -> dict[str, Any]:
+    The prompt contains ONLY the pending_messages (the conversation to be ingested).
+    The task loop (custom_generate → IngestT2AgentLoopTask.run()) will:
+    1. Load the snapshot from metadata.snapshot_id
+    2. Build the full system prompt (INGEST_T2_AGENT_SYSTEM_PROMPT)
+    3. Build the user prompt with memory state + conversation
+    4. Expose the full tool set (INGEST_T2_AGENT_TOOLS)
+    """
     snapshot_id = record.get("snapshot_id", "")
     traj_id = record.get("trajectory_id", "")
-    with session.load(traj_id=traj_id, snapshot_id=snapshot_id) as loaded:
-        state_summary = summarize_env(loaded)
+    pending_messages = record.get("pending_messages", [])
 
-    user_prompt = f"""{state_summary}
-
----
-
-## Conversation to Process (session: {record.get('session_id', '')})
-
-{format_messages(record.get('pending_messages', []))}
-
----
-
-Extract valuable information and write it into the memory system. Compare
-against Current Memory State to decide ADD vs UPDATE.
-"""
+    # prompt: just the conversation messages that need to be ingested
+    # This is the key input for the ingest task — everything else comes from the snapshot
+    prompt = [{"role": "user", "content": msg.get("content", "")} if msg.get("role") == "user"
+              else {"role": msg.get("role", "assistant"), "content": msg.get("content", "")}
+              for msg in pending_messages]
 
     probes = select_task_probes(record, "ingest", fallback_all_when_untyped=True)
     return {
-        "prompt": [
-            {"role": "system", "content": INGEST_T3_SYSTEM_PROMPT + OUTPUT_INSTRUCTION},
-            {"role": "user", "content": user_prompt},
-        ],
+        "prompt": prompt,
         "label": None,
         "metadata": {
-            "task": "ingest_t3",
+            "task": "ingest_t2_agent_loop",
             "snapshot_id": snapshot_id,
             "traj_id": traj_id,
             "user_id": record.get("user_id", ""),
             "session_id": record.get("session_id", ""),
             "session_time": record.get("generated_at", ""),
-            "pending_messages": record.get("pending_messages", []),
+            "pending_messages": pending_messages,
             "probes": probes,
             "probe_source": "query_probes:ingest",
-            "tools": [tool.get("function", {}).get("name", "") for tool in INGEST_T3_TOOLS],
+            "tools": [tool.get("function", {}).get("name", "") for tool in INGEST_T2_AGENT_TOOLS],
         },
     }
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Convert T3 ingest RL data to Slime JSONL")
+    parser = argparse.ArgumentParser(description="Convert ingest RL data to Slime JSONL (task_loop mode)")
     parser.add_argument("--input", required=True, help="Input rl_data.jsonl")
-    parser.add_argument("--data-root", default=None, help="Dataset root; defaults to input parent")
+    parser.add_argument("--data-root", default=None, help="Dataset root (unused in task_loop mode, kept for CLI compat)")
     parser.add_argument("--output", required=True)
     parser.add_argument("--eval_output", default=None)
     parser.add_argument("--eval_ratio", type=float, default=0.05)
@@ -144,12 +85,10 @@ def main() -> None:
     args = parser.parse_args()
 
     input_path = Path(args.input)
-    data_root = Path(args.data_root) if args.data_root else input_path.parent
-    session = SnapshotSession(str(data_root), enable_git=False)
 
     records = [json.loads(line) for line in input_path.read_text(encoding="utf-8").splitlines() if line.strip()]
     samples = [
-        convert_record(r, session)
+        convert_record(r)
         for r in records
         if r.get("rl_task_type", "ingest") == "ingest"
         and select_task_probes(r, "ingest", fallback_all_when_untyped=True)

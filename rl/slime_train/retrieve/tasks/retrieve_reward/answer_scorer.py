@@ -87,7 +87,7 @@ def score_fill(model_answer: str, ground_truth: dict) -> float:
 
     best_score = 0.0
     for answer in acceptable:
-        answer_lower = answer.lower().strip()
+        answer_lower = str(answer).lower().strip()
         if not answer_lower:
             continue
 

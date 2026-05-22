@@ -64,13 +64,19 @@ async def custom_generate(args, sample, sampling_params: dict) -> Any:
     """
     tokenizer = _get_tokenizer(args)
     prompt = getattr(sample, "prompt", "")
-    prompt_text = _render_prompt(prompt, tokenizer)
     metadata = getattr(sample, "metadata", {}) if isinstance(getattr(sample, "metadata", {}), dict) else {}
     task = _task_from_metadata(metadata)
+    tools = metadata.get("tools") if isinstance(metadata.get("tools"), list) else None
     max_turns = int(os.environ.get("MEMORY_RL_MAX_AGENT_TURNS", getattr(args, "memory_rl_max_agent_turns", 4)))
+
+    # Initialize tool schemas for type-aware parameter parsing
+    from llm_gateway.rl.slime_train.memory_rl.response_parser import set_tool_schemas
+    set_tool_schemas(tools)
 
     if _use_native_task_loop_rollout(task, metadata):
         return await _custom_generate_task_loop(args, sample, sampling_params, tokenizer, task, metadata)
+
+    prompt_text = _render_prompt(prompt, tokenizer, tools=tools)
 
     prompt_token_ids = _encode(tokenizer, prompt_text)
     response_token_ids: list[int] = []
@@ -91,19 +97,42 @@ async def custom_generate(args, sample, sampling_params: dict) -> Any:
         _set_sample_output(sample, prompt_token_ids, response_token_ids, loss_mask, final_text, final_finish_type)
         return sample
 
+    use_server_parser = _use_sglang_tool_parser() and tools
+
     async with _build_tool_executor(task, metadata, args) as executor:
         for turn in range(max_turns):
-            output = await _post_generate(args, current_text, sampling_params)
-            assistant_text = str(output.get("text", ""))
-            final_text = assistant_text
-            final_finish_type = _finish_type(output)
+            if use_server_parser:
+                # --- SGLang /generate + /parse_function_call path ---
+                # Ensure skip_special_tokens=False so tool-call markers are preserved
+                sp = dict(sampling_params)
+                sp["skip_special_tokens"] = False
+                output = await _post_generate(args, current_text, sp)
+                assistant_text = str(output.get("text", ""))
+                final_text = assistant_text
+                final_finish_type = _finish_type(output)
 
-            assistant_ids = _encode(tokenizer, assistant_text)
-            response_token_ids.extend(assistant_ids)
-            loss_mask.extend([1] * len(assistant_ids))
-            current_text += assistant_text
+                assistant_ids = _encode(tokenizer, assistant_text)
+                response_token_ids.extend(assistant_ids)
+                loss_mask.extend([1] * len(assistant_ids))
+                current_text += assistant_text
 
-            calls, _ = parse_tool_calls_response(assistant_text)
+                # Parse tool calls via /parse_function_call endpoint
+                parse_result = await _post_parse_function_call(args, assistant_text, tools)
+                calls = _parse_function_call_response(parse_result)
+            else:
+                # --- Local regex parsing path (original) ---
+                output = await _post_generate(args, current_text, sampling_params)
+                assistant_text = str(output.get("text", ""))
+                final_text = assistant_text
+                final_finish_type = _finish_type(output)
+
+                assistant_ids = _encode(tokenizer, assistant_text)
+                response_token_ids.extend(assistant_ids)
+                loss_mask.extend([1] * len(assistant_ids))
+                current_text += assistant_text
+
+                calls, _ = parse_tool_calls_response(assistant_text)
+
             if not calls:
                 trace.append({"turn": turn, "content": assistant_text, "tool_calls": [], "observations": []})
                 break
@@ -120,11 +149,17 @@ async def custom_generate(args, sample, sampling_params: dict) -> Any:
             if any(call.get("tool") == "finish" for call in calls):
                 break
 
-            observation_text = "\n\n" + _format_observations_for_prompt(observations) + "\n\n"
+            # Format observations in Qwen3.6 chat_template format:
+            # <|im_end|>\n<|im_start|>user\n<tool_response>...\n</tool_response><|im_end|>\n<|im_start|>assistant\n<think>\n
+            obs_content = _format_observations_for_prompt(observations)
+            observation_text = f"<|im_end|>\n<|im_start|>user\n{obs_content}<|im_end|>\n<|im_start|>assistant\n<think>\n"
             observation_ids = _encode(tokenizer, observation_text)
             response_token_ids.extend(observation_ids)
             loss_mask.extend([0] * len(observation_ids))
             current_text += observation_text
+
+            if use_server_parser:
+                pass  # /generate path: current_text already updated above, observation_text appended below
 
     stop_reason = "finish" if any(call.get("tool") == "finish" for call in all_calls) else "no_tool_calls" if not all_calls else "max_turns"
     response_payload = {
@@ -157,28 +192,42 @@ async def _custom_generate_task_loop(args, sample, sampling_params: dict, tokeni
         task_version=os.environ.get("MEMORY_RL_TASK_VERSION", "t2_agent_loop"),
     )
     loaded = await _load_snapshot_for_task_loop(session, metadata, adapter)
+    step_index = metadata.get("step_index")
     try:
         if task == "ingest":
+            ingest_extras: dict[str, Any] = {
+                "session_id": metadata.get("session_id", ""),
+                "session_time": metadata.get("session_time", ""),
+                "pending_messages": metadata.get("pending_messages", []),
+            }
+            if step_index is not None:
+                ingest_extras["ingest_number"] = int(step_index)
             step = await loaded.env.apply_ingest_tool_calls(
                 [],
                 session_time=metadata.get("session_time", ""),
-                extras={
-                    "session_id": metadata.get("session_id", ""),
-                    "session_time": metadata.get("session_time", ""),
-                    "pending_messages": metadata.get("pending_messages", []),
-                },
+                extras=ingest_extras,
             )
         elif task == "consolidate":
+            consolidate_extras: dict[str, Any] = {
+                "session_id": metadata.get("session_id", ""),
+            }
+            if step_index is not None:
+                consolidate_extras["step_index"] = int(step_index)
             step = await loaded.env.apply_consolidate_tool_calls(
                 [],
-                extras={"session_id": metadata.get("session_id", "")},
+                extras=consolidate_extras,
             )
         elif task == "retrieve":
             query = _retrieve_query_from_metadata(metadata)
+            retrieve_extra: dict[str, Any] = {}
+            if metadata.get("session_time"):
+                retrieve_extra["session_time"] = metadata["session_time"]
+            if step_index is not None:
+                retrieve_extra["step_index"] = int(step_index)
             step = await loaded.env.step_query(
                 query=query,
                 session_id=str(metadata.get("session_id", "")),
-                extra_payload={"session_time": metadata.get("session_time", "")} if metadata.get("session_time") else None,
+                extra_payload=retrieve_extra or None,
             )
         else:
             raise RuntimeError(f"task_loop custom_generate does not support task={task!r}")
@@ -247,8 +296,6 @@ class SlimeTaskLoopLLM:
         tools: list[dict] | None = None,
     ) -> LLMResponse:
         self.sync_observations_from_messages(messages)
-        rendered = _render_chat_for_task_loop(system, messages, tools, self.tokenizer)
-        self._append_prompt_delta(rendered)
 
         sampling_params = dict(self.sampling_params)
         if temperature is not None:
@@ -257,29 +304,73 @@ class SlimeTaskLoopLLM:
             sampling_params["max_new_tokens"] = max_tokens
             sampling_params["max_tokens"] = max_tokens
 
-        output = await _post_generate(self.args, rendered, sampling_params)
-        text = str(output.get("text", ""))
-        self.final_text = text
-        self.final_finish_type = _finish_type(output)
+        if _use_sglang_tool_parser() and tools:
+            # --- SGLang /generate + /parse_function_call path ---
+            rendered = _render_chat_for_task_loop(system, messages, tools, self.tokenizer)
+            self._append_prompt_delta(rendered)
 
-        ids = _encode(self.tokenizer, text)
-        self.response_token_ids.extend(ids)
-        self.loss_mask.extend([1] * len(ids))
-        self._last_rendered = rendered + text
+            # Generate with skip_special_tokens=False to preserve tool-call markers
+            sp = dict(sampling_params)
+            sp["skip_special_tokens"] = False
+            output = await _post_generate(self.args, rendered, sp)
+            text = str(output.get("text", ""))
+            self.final_text = text
+            self.final_finish_type = _finish_type(output)
 
-        tool_calls = _parse_generated_tool_calls(text, call_offset=self._call_index)
-        self._call_index += len(tool_calls)
-        normalized_calls = [
-            {"tool": tc.name, "arguments": tc.arguments, "id": tc.id}
-            for tc in tool_calls
-        ]
-        self.all_calls.extend(normalized_calls)
-        self.trace.append({
-            "turn": len(self.trace),
-            "content": text,
-            "tool_calls": normalized_calls,
-            "observations": [],
-        })
+            ids = _encode(self.tokenizer, text)
+            self.response_token_ids.extend(ids)
+            self.loss_mask.extend([1] * len(ids))
+            self._last_rendered = rendered + text
+
+            # Parse tool calls via /parse_function_call endpoint
+            parse_result = await _post_parse_function_call(self.args, text, tools)
+            normalized_calls = _parse_function_call_response(parse_result)
+            self._call_index += len(normalized_calls)
+            self.all_calls.extend(normalized_calls)
+            self.trace.append({
+                "turn": len(self.trace),
+                "content": text,
+                "tool_calls": normalized_calls,
+                "observations": [],
+            })
+
+            # Convert to ToolCall objects for LLMResponse
+            tool_calls = [
+                ToolCall(
+                    id=str(c.get("id") or f"slime_task_loop_call_{self._call_index - len(normalized_calls) + i}"),
+                    name=c["tool"],
+                    arguments=c.get("arguments", {}),
+                )
+                for i, c in enumerate(normalized_calls)
+            ]
+        else:
+            # --- Local regex parsing path (original) ---
+            rendered = _render_chat_for_task_loop(system, messages, tools, self.tokenizer)
+            self._append_prompt_delta(rendered)
+
+            output = await _post_generate(self.args, rendered, sampling_params)
+            text = str(output.get("text", ""))
+            self.final_text = text
+            self.final_finish_type = _finish_type(output)
+
+            ids = _encode(self.tokenizer, text)
+            self.response_token_ids.extend(ids)
+            self.loss_mask.extend([1] * len(ids))
+            self._last_rendered = rendered + text
+
+            tool_calls = _parse_generated_tool_calls(text, call_offset=self._call_index)
+            self._call_index += len(tool_calls)
+            normalized_calls = [
+                {"tool": tc.name, "arguments": tc.arguments, "id": tc.id}
+                for tc in tool_calls
+            ]
+            self.all_calls.extend(normalized_calls)
+            self.trace.append({
+                "turn": len(self.trace),
+                "content": text,
+                "tool_calls": normalized_calls,
+                "observations": [],
+            })
 
         return LLMResponse(
             content=text,
@@ -372,6 +463,81 @@ async def _post_generate(args, text: str, sampling_params: dict) -> dict[str, An
             return json.loads(body)
 
 
+async def _post_parse_function_call(
+    args,
+    text: str,
+    tools: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Call SGLang /parse_function_call endpoint to parse tool calls from
+    generated text using the server-side qwen3_coder parser.
+
+    Args:
+        args: slime args (contains router address info)
+        text: the raw model-generated text from /generate
+        tools: tool definitions in OpenAI format
+
+    Returns a dict with:
+      - "normal_text": non-tool-call text content
+      - "calls": list of {"name": str, "parameters": str(JSON)} or []
+    """
+    url = _router_parse_function_call_url(args)
+    timeout = aiohttp.ClientTimeout(total=int(os.environ.get("MEMORY_RL_GENERATE_TIMEOUT", "300")))
+
+    tool_call_parser = os.environ.get("MEMORY_RL_TOOL_CALL_PARSER", "qwen3_coder")
+    payload: dict[str, Any] = {
+        "text": text,
+        "tool_call_parser": tool_call_parser,
+        "tools": tools,
+    }
+
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.post(url, json=payload) as resp:
+            body = await resp.text()
+            if resp.status != 200:
+                raise RuntimeError(f"sglang parse_function_call http {resp.status}: {body[:500]}")
+            return json.loads(body)
+
+
+def _parse_function_call_response(parse_result: dict[str, Any]) -> list[dict[str, Any]]:
+    """Convert /parse_function_call response into our internal
+    ``[{"tool": name, "arguments": {...}}]`` format.
+
+    The parse_function_call endpoint returns:
+      {"normal_text": "...", "calls": [{"name": "fn_name", "parameters": "{...}"}]}
+    """
+    results: list[dict[str, Any]] = []
+    calls = parse_result.get("calls") or []
+    for call in calls:
+        name = call.get("name", "")
+        if not name:
+            continue
+        parameters_raw = call.get("parameters", "{}")
+        if isinstance(parameters_raw, str):
+            try:
+                arguments = json.loads(parameters_raw)
+            except json.JSONDecodeError:
+                arguments = {}
+        elif isinstance(parameters_raw, dict):
+            arguments = parameters_raw
+        else:
+            arguments = {}
+        results.append({"tool": name, "arguments": arguments})
+    return results
+
+
+def _use_sglang_tool_parser() -> bool:
+    """Check if we should use SGLang's server-side /parse_function_call
+    endpoint instead of local regex parsing.
+
+    Enable by setting: MEMORY_RL_USE_SGLANG_TOOL_PARSER=1
+    This requires the SGLang server to be started with --tool-call-parser qwen3_coder
+    (via slime's --sglang-tool-call-parser qwen3_coder passthrough).
+
+    Flow: /generate -> get raw text -> /parse_function_call -> structured calls
+    """
+    return os.environ.get("MEMORY_RL_USE_SGLANG_TOOL_PARSER", "0") == "1"
+
+
 def _router_generate_url(args) -> str:
     if os.environ.get("SGLANG_ROUTER_URL"):
         return os.environ["SGLANG_ROUTER_URL"].rstrip("/") + "/generate"
@@ -380,6 +546,17 @@ def _router_generate_url(args) -> str:
     host = getattr(args, "sglang_router_ip", "127.0.0.1")
     port = getattr(args, "sglang_router_port", 30000)
     return f"http://{host}:{port}/generate"
+
+
+def _router_parse_function_call_url(args) -> str:
+    """Get the /parse_function_call endpoint URL from the SGLang router."""
+    if os.environ.get("SGLANG_ROUTER_URL"):
+        return os.environ["SGLANG_ROUTER_URL"].rstrip("/") + "/parse_function_call"
+    if getattr(args, "sglang_router_url", None):
+        return str(args.sglang_router_url).rstrip("/") + "/parse_function_call"
+    host = getattr(args, "sglang_router_ip", "127.0.0.1")
+    port = getattr(args, "sglang_router_port", 30000)
+    return f"http://{host}:{port}/parse_function_call"
 
 
 def _get_tokenizer(args):
@@ -399,10 +576,12 @@ def _get_tokenizer(args):
     return TOKENIZER
 
 
-def _render_prompt(prompt: Any, tokenizer) -> str:
+def _render_prompt(prompt: Any, tokenizer, tools: list[dict] | None = None) -> str:
     if isinstance(prompt, list):
         try:
-            return tokenizer.apply_chat_template(prompt, tokenize=False, add_generation_prompt=True)
+            return tokenizer.apply_chat_template(
+                prompt, tools=tools or None, tokenize=False, add_generation_prompt=True
+            )
         except Exception:
             return "\n".join(f"{m.get('role', 'user')}: {m.get('content', '')}" for m in prompt if isinstance(m, dict))
     return str(prompt)
@@ -413,10 +592,26 @@ def _render_chat_for_task_loop(system: str, messages: list[dict[str, Any]], tool
     try:
         return tokenizer.apply_chat_template(chat, tools=tools or None, tokenize=False, add_generation_prompt=True)
     except Exception:
+        # Fallback: manual Qwen3.6-style rendering
         tool_text = ""
         if tools:
-            tool_text = "\n\nAvailable tools (call them by returning JSON {\"tool_calls\":[...]}):\n" + json.dumps(tools, ensure_ascii=False)
-        return "\n".join(f"{m.get('role', 'user')}: {m.get('content', '')}" for m in chat) + tool_text + "\nassistant:"
+            tool_text = (
+                "# Tools\n\nYou have access to the following functions:\n\n<tools>\n"
+                + "\n".join(json.dumps(t, ensure_ascii=False) for t in tools)
+                + "\n</tools>\n\n"
+                "If you choose to call a function ONLY reply in the following format with NO suffix:\n\n"
+                "<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\n"
+                "value_1\n</parameter>\n</function>\n</tool_call>"
+            )
+        parts = []
+        if system or tool_text:
+            parts.append(f"<|im_start|>system\n{tool_text}\n\n{system}<|im_end|>" if tool_text else f"<|im_start|>system\n{system}<|im_end|>")
+        for m in messages:
+            role = m.get("role", "user")
+            content = m.get("content", "")
+            parts.append(f"<|im_start|>{role}\n{content}<|im_end|>")
+        parts.append("<|im_start|>assistant\n<think>\n")
+        return "\n".join(parts)
 
 
 def _encode(tokenizer, text: str) -> list[int]:
@@ -545,14 +740,18 @@ def _task_from_metadata(metadata: dict[str, Any]) -> str:
 
 
 def _format_observations_for_prompt(observations: list[dict[str, Any]]) -> str:
-    lines = ["Tool observations:"]
-    for i, obs in enumerate(observations, 1):
+    """Format tool observations as Qwen3 chat_template <tool_response> blocks.
+
+    This matches the Qwen3.6 chat_template format where tool responses are
+    wrapped in ``<tool_response>...</tool_response>`` XML tags inside a user message.
+    """
+    parts: list[str] = []
+    for obs in observations:
         result = str(obs.get("result", ""))
         if len(result) > 2000:
             result = result[:2000] + "\n... (truncated)"
-        lines.append(f"{i}. {obs.get('tool', '')}: {result}")
-    lines.append("Continue with more tool calls if needed, otherwise call finish.")
-    return "\n".join(lines)
+        parts.append(f"<tool_response>\n{result}\n</tool_response>")
+    return "\n".join(parts)
 
 
 def _last_finish_summary(calls: list[dict[str, Any]]) -> str:

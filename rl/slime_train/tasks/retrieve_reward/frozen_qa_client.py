@@ -120,7 +120,7 @@ def call_frozen_model(messages: list[dict[str, str]]) -> str:
     payload = json.dumps({
         "model": model_name,
         "messages": messages,
-        "max_tokens": int(os.environ.get("FROZEN_MODEL_MAX_TOKENS", "256")),
+        "max_tokens": int(os.environ.get("FROZEN_MODEL_MAX_TOKENS", "8192")),
         "temperature": float(os.environ.get("FROZEN_MODEL_TEMPERATURE", "0.0")),
     }).encode("utf-8")
 

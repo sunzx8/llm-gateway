@@ -38,20 +38,30 @@ class EnvToolExecutor:
         if self.loaded is None:
             raise RuntimeError("EnvToolExecutor must be used as an async context manager")
 
+        step_index = self.metadata.get("step_index")
+
         if self.task == "ingest":
+            ingest_extras: dict[str, Any] = {
+                "session_id": self.metadata.get("session_id", ""),
+                "session_time": self.metadata.get("session_time", ""),
+                "pending_messages": self.metadata.get("pending_messages", []),
+            }
+            if step_index is not None:
+                ingest_extras["ingest_number"] = int(step_index)
             step = await self.loaded.env.apply_ingest_tool_calls(
                 calls,
                 session_time=self.metadata.get("session_time", ""),
-                extras={
-                    "session_id": self.metadata.get("session_id", ""),
-                    "session_time": self.metadata.get("session_time", ""),
-                    "pending_messages": self.metadata.get("pending_messages", []),
-                },
+                extras=ingest_extras,
             )
         elif self.task == "consolidate":
+            consolidate_extras: dict[str, Any] = {
+                "session_id": self.metadata.get("session_id", ""),
+            }
+            if step_index is not None:
+                consolidate_extras["step_index"] = int(step_index)
             step = await self.loaded.env.apply_consolidate_tool_calls(
                 calls,
-                extras={"session_id": self.metadata.get("session_id", "")},
+                extras=consolidate_extras,
             )
         else:
             return [{"tool": call.get("tool", ""), "arguments": call.get("arguments", {}), "result": "no executor"} for call in calls]

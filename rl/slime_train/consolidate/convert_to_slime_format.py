@@ -1,9 +1,15 @@
 #!/usr/bin/env python3
-"""Convert T3 query-probe data into consolidate/evolve RL samples.
+"""Convert consolidate snapshot data to Slime JSONL format (task_loop mode).
 
-Preferred input is the ``rl_data_test_2`` style schema where every record has
-``probes_by_task.consolidate``. For older ingest-only datasets, the converter can
-fallback to adjacent ingest probes as a best-effort evolution objective.
+When ``MEMORY_RL_APPLY_MODE=task_loop``, the custom_generate function delegates
+to ``ConsolidateT2AgentLoopTask.run()`` which constructs the system prompt, user
+prompt, and tools INTERNALLY from the snapshot state. Therefore the dataset only
+needs to provide MINIMAL metadata:
+  - prompt: empty or a simple trigger (consolidate is triggered, not user-driven)
+  - metadata: snapshot_id, traj_id, probes, etc.
+
+The task loop will build the full agent loop prompt (with complete memory state,
+C1-C11 checklist, etc.) at generate time.
 """
 
 from __future__ import annotations
@@ -24,94 +30,46 @@ from llm_gateway.rl.slime_train.memory_rl.paths import ensure_workspace_paths
 
 ensure_workspace_paths(__file__)
 
-from llm_gateway.rl.slime_train._t3_assets import CONSOLIDATE_T3_SYSTEM_PROMPT, CONSOLIDATE_T3_TOOLS
-from llm_gateway.rl.rl_env.snapshot_session import SnapshotSession
+from llm_gateway.atomic_t2_agent_loop.consolidate_task import (
+    CONSOLIDATE_T2_AGENT_TOOLS,
+)
 from llm_gateway.rl.slime_train.memory_rl.probes import select_task_probes
 
-OUTPUT_INSTRUCTION = """
 
-## RL Output Format
+def convert_record(record: dict[str, Any], probes: list[dict[str, Any]], probe_source: str) -> dict[str, Any]:
+    """Convert a single consolidate record to Slime training format.
 
-You cannot call native tools in this training environment. Output one JSON object:
-
-{
-  "tool_calls": [
-    {"tool": "fs_write", "arguments": {"path": "...", "content": "..."}},
-    {"tool": "fs_append", "arguments": {"path": "...", "content": "..."}},
-    {"tool": "vec_add", "arguments": {"collection": "...", "items": [{"text": "...", "metadata": {...}}]}},
-    {"tool": "graph_add_node", "arguments": {"node_id": "...", "label": "...", "properties": {...}}},
-    {"tool": "graph_add_edge", "arguments": {"source": "...", "target": "...", "relation": "...", "properties": {...}}},
-    {"tool": "finish", "arguments": {"summary": "..."}}
-  ]
-}
-
-Your edits will be evaluated by hidden query probes before and after evolution.
-Optimize retrieval correctness without adding unsupported facts or deleting source evidence.
-"""
-
-
-def summarize_env(loaded) -> str:
-    fs_files = loaded.fs.list_files()
-    parts = [
-        "## Current Memory State",
-        "",
-        f"### File System Structure ({len(fs_files)} files):",
-        loaded.fs.tree(max_depth=4),
-        "",
-        "### File Contents Preview:",
-    ]
-    for path in fs_files[:20]:
-        content = loaded.fs.read_file(path)
-        if len(content) > 1600:
-            content = content[:1600] + "\n... (truncated)"
-        parts.append(f"\n#### {path}\n{content}")
-    if not fs_files:
-        parts.append("(no files)")
-    parts.extend([
-        "",
-        "### Vector DB Stats:",
-        json.dumps(loaded.vec.get_stats(), ensure_ascii=False),
-        "",
-        "### Graph DB Stats:",
-        json.dumps(loaded.graph.get_stats(), ensure_ascii=False),
-    ])
-    return "\n".join(parts)
-
-
-def convert_record(record: dict[str, Any], session: SnapshotSession, probes: list[dict[str, Any]], probe_source: str) -> dict[str, Any]:
+    The prompt is minimal — just a trigger signal. The task loop
+    (custom_generate → ConsolidateT2AgentLoopTask.run()) will:
+    1. Load the snapshot from metadata.snapshot_id
+    2. Read the full memory state (FS files, Vec entries, Graph edges)
+    3. Build the complete system + user prompt with C1-C11 checklist
+    4. Expose the full consolidate tool set
+    """
     snapshot_id = record.get("snapshot_id", "")
     traj_id = record.get("trajectory_id", "")
-    with session.load(traj_id=traj_id, snapshot_id=snapshot_id) as loaded:
-        state_summary = summarize_env(loaded)
 
-    user_prompt = f"""{state_summary}
+    # prompt: minimal trigger — consolidate doesn't have user-provided input
+    # The task loop builds everything from the snapshot state
+    prompt = [{"role": "user", "content": "Perform memory consolidation."}]
 
----
-
-Review the memory state and emit conservative consolidate/evolution tool calls
-that improve future query-probe retrieval. Focus on routing/index notes, vector
-coverage, graph connectivity, deduplication, and preserving provenance.
-"""
     return {
-        "prompt": [
-            {"role": "system", "content": CONSOLIDATE_T3_SYSTEM_PROMPT + OUTPUT_INSTRUCTION},
-            {"role": "user", "content": user_prompt},
-        ],
+        "prompt": prompt,
         "label": None,
         "metadata": {
-            "task": "consolidate_t3",
+            "task": "consolidate_t2_agent_loop",
             "snapshot_id": snapshot_id,
             "traj_id": traj_id,
             "user_id": record.get("user_id", ""),
             "session_id": record.get("session_id", ""),
             "probes": probes,
             "probe_source": probe_source,
-            "tools": [tool.get("function", {}).get("name", "") for tool in CONSOLIDATE_T3_TOOLS],
+            "tools": [tool.get("function", {}).get("name", "") for tool in CONSOLIDATE_T2_AGENT_TOOLS],
         },
     }
 
 
-def build_samples(records: list[dict[str, Any]], session: SnapshotSession) -> list[dict[str, Any]]:
+def build_samples(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Build consolidate samples from explicit consolidate query probes first.
 
     ``rl_data_test_2`` provides ``probes_by_task.consolidate`` on the same
@@ -124,7 +82,7 @@ def build_samples(records: list[dict[str, Any]], session: SnapshotSession) -> li
     for record in records:
         probes = select_task_probes(record, "consolidate")
         if probes:
-            samples.append(convert_record(record, session, probes, "query_probes:consolidate"))
+            samples.append(convert_record(record, probes, "query_probes:consolidate"))
 
     if samples:
         return samples
@@ -140,14 +98,14 @@ def build_samples(records: list[dict[str, Any]], session: SnapshotSession) -> li
             if not probes:
                 continue
             current = {**current, "trajectory_id": traj_id}
-            samples.append(convert_record(current, session, probes, "adjacent_ingest_query_probes:fallback"))
+            samples.append(convert_record(current, probes, "adjacent_ingest_query_probes:fallback"))
     return samples
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Convert T3 consolidate RL data to Slime JSONL")
+    parser = argparse.ArgumentParser(description="Convert consolidate RL data to Slime JSONL (task_loop mode)")
     parser.add_argument("--input", required=True, help="Input rl_data.jsonl")
-    parser.add_argument("--data-root", default=None, help="Dataset root; defaults to input parent")
+    parser.add_argument("--data-root", default=None, help="Dataset root (unused in task_loop mode, kept for CLI compat)")
     parser.add_argument("--output", required=True)
     parser.add_argument("--eval_output", default=None)
     parser.add_argument("--eval_ratio", type=float, default=0.05)
@@ -155,10 +113,8 @@ def main() -> None:
     args = parser.parse_args()
 
     input_path = Path(args.input)
-    data_root = Path(args.data_root) if args.data_root else input_path.parent
     records = [json.loads(line) for line in input_path.read_text(encoding="utf-8").splitlines() if line.strip()]
-    session = SnapshotSession(str(data_root), enable_git=False)
-    samples = build_samples(records, session)
+    samples = build_samples(records)
 
     rng = random.Random(args.seed)
     rng.shuffle(samples)
