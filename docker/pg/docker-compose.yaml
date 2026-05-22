@@ -1,0 +1,22 @@
+
+services:
+  postgres:
+    image: mirrors.tencent.com/dml/postgres-for-mem:16-20260508
+    container_name: llm_gateway_pg
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: limaoqiu
+      POSTGRES_PASSWORD: limaoqiu
+      POSTGRES_DB: t2
+    ports:
+      - "5432:5432"
+    volumes:
+      # 持久化数据
+      - ./pgdata:/var/lib/postgresql/data
+      # 初始化脚本（容器首次启动时自动执行）
+      - ../../resources/schema/001_initial.sql:/docker-entrypoint-initdb.d/01_tables.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U limaoqiu -d t2"]
+      interval: 5s
+      timeout: 5s
+      retries: 5

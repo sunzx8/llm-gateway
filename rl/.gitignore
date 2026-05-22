@@ -1,0 +1,17 @@
+# 训练产出物（每次 run 数十 MB ~ 数 GB，绝不入库）
+slime_train/*/outputs/
+slime_train/*/logs/
+slime_train/*/data/*.jsonl
+
+# 老 workspace 复制过来的 .cbsnap 数据集（按需复制，不入库）
+**/*.cbsnap
+**/snapshots/
+**/_env_tmp/
+
+# Python 缓存
+**/__pycache__/
+**/*.pyc
+**/.pytest_cache/
+
+# 临时迁移工件（保留供参考但可选忽略）
+# _migration_import_map.md   # 取消注释则忽略

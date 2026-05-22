@@ -1,0 +1,11 @@
+"""Atomic_Code_T2 方案专用提示词集。"""
+
+from .ingest_prompt import INGEST_SYSTEM_PROMPT, INGEST_USER_TEMPLATE
+from .consolidate_prompt import CONSOLIDATE_SYSTEM_PROMPT, CONSOLIDATE_USER_TEMPLATE
+
+__all__ = [
+    "INGEST_SYSTEM_PROMPT",
+    "INGEST_USER_TEMPLATE",
+    "CONSOLIDATE_SYSTEM_PROMPT",
+    "CONSOLIDATE_USER_TEMPLATE",
+]

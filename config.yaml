@@ -1,0 +1,164 @@
+# LLM Gateway 配置文件
+#
+# 结构说明：
+#   litellm:     LiteLLM 组件的配置，原样传递给 LiteLLM，不做任何修改
+#   llm_gateway: 本服务自身的配置
+
+# ============================================================
+# LiteLLM 配置（完整的 LiteLLM config 格式）
+# ============================================================
+litellm:
+  model_list:
+    # OpenAI 模型
+    - model_name: deepseek-v4-pro
+      litellm_params:
+        model: openai/deepseek-v4-pro
+        api_key: EMPTY
+        base_url: http://123.207.200.23:30000/v1/
+
+    - model_name: gpt-4o
+      litellm_params:
+        model: openai/gpt-4o
+        api_key: "os.environ/OPENAI_API_KEY"
+        base_url: "os.environ/OPENAI_BASE_URL"
+
+    - model_name: gpt-4o-mini
+      litellm_params:
+        model: openai/gpt-4o-mini
+        api_key: "os.environ/OPENAI_API_KEY"
+        base_url: "os.environ/OPENAI_BASE_URL"
+
+    - model_name: gpt-5.4
+      litellm_params:
+        model: openai/gpt-5.4
+        api_key: "os.environ/OPENAI_API_KEY"
+        base_url: "os.environ/OPENAI_BASE_URL"
+
+    - model_name: gpt-5.5
+      litellm_params:
+        model: openai/gpt-5.5
+        api_key: "os.environ/OPENAI_API_KEY"
+        base_url: "os.environ/OPENAI_BASE_URL"
+
+    # tokenhub 上的 ep-2bjbej6a 实际背后是 gpt-5.4
+    - model_name: ep-2bjbej6a
+      litellm_params:
+        model: openai/ep-2bjbej6a
+        api_key: "os.environ/OPENAI_API_KEY"
+        base_url: "os.environ/OPENAI_BASE_URL"
+
+    - model_name: fake-model
+      litellm_params:
+        model: fake/fake-model
+        api_key: "mock-key"
+
+    - model_name: memory-initialize
+      litellm_params:
+        model: fake/fake-model
+        api_key: "mock-key"
+
+  litellm_settings:
+    num_retries: 3          # 失败自动重试次数
+    request_timeout: 1800     # 请求超时（秒）
+    drop_params: true       # 自动丢弃不支持的参数，避免报错
+    set_verbose: false
+    custom_provider_map:
+      - provider: fake
+        custom_handler: gateway.fake_llm.fake_llm
+
+  general_settings:
+    master_key: sk-my-test-key-123        # 访问鉴权 master key
+    max_parallel_requests: 100
+
+# ============================================================
+# LLM Gateway 自身配置
+# ============================================================
+llm_gateway:
+  logging:
+    level: "INFO"
+    file_enabled: true
+    file_path: "./logs"
+    console_enabled: true
+    console_colored: false
+  llm_hook_handler: context_task.llm_hook_handler.T2MemoryHandler
+
+memory_config: 
+  memory_llm:
+    # 支持的 provider: openai / anthropic / openai_compat
+    provider: openai
+    model: ep-2bjbej6a
+    base_url: "os.environ/OPENAI_BASE_URL"
+    api_key: "os.environ/OPENAI_API_KEY"
+
+    temperature: 1.0
+    max_tokens: 16384
+    timeout: 1800.0            # 长上下文 memory 场景需要较长超时（5~10min）
+    max_retries: 3
+
+  # ============================================================
+  # Embedding 模型配置
+  # ============================================================
+  embedding:
+    # 支持的 provider: openai / openai_compat
+    provider: openai_compat
+    model: bge-m3
+    api_key: EMPTY                                   # 自部署服务，无鉴权
+    base_url: http://81.70.50.154:8082/v1            # 自部署 bge-m3 服务
+    batch_size: 64            # 批量请求大小
+    dimensions: null          # 向量维度（null 表示使用模型默认维度）
+    timeout: 120.0
+    max_retries: 3
+
+  # ============================================================
+  # Context Task 任务配置
+  # ============================================================
+  context_task:
+    # ContextTask 运行模式:
+    #   T2             - 使用 LLM agent loop 进行摄入/演进/检索
+    #   Code_T2        - 完全使用代码生成的摄入和消费脚本（单一子类）
+    #   Multi_Code_T1  - 多策略消费代码生成（不含摄入代码生成），摄入/检索复用 T2
+    #   Multi_Code_T2  - 多策略代码生成 + 多子类选择/生成（支持摄入和检索）
+    #   Atomic_Code_T2 - 原子操作 + 内置 plan（agent-loop ingest + 目录动态加载 retrieve）
+    context_task_mode: Atomic_Code_T2
+
+    ingest_context_task:
+      token_budget_per_ingest: 2000    # 每次 ingest 的 token 阈值
+      max_messages_per_ingest: 10      # 消息条数的硬性上限
+      max_turns: 15                    # agent loop 的最大轮次
+
+    consolidate_context_task:
+      min_items_for_evolution: 5    # 记忆条目低于此数时跳过演进
+      max_turns: 30                    # agent loop 的最大轮次
+
+    retrieve_context_task:
+      max_turns: 20                    # agent loop 的最大轮次
+
+    # 注：Atomic_Code_T2 阶段尚未实现 consolidate（演进），阈值设为极大值即可禁用。
+    # 切换到 T2 / Code_T2 / Multi_Code_T* 模式时请改回 10 这类正常值。
+    consolidate_trigger_threshold: 5                # 累积 ingest 次数触发 consolidate
+    consolidate_retrieve_trigger_threshold: 999999 # 累积 retrieve 次数触发 consolidate
+
+  # ============================================================
+  # Memory 存储后端配置
+  # ============================================================
+  storage:
+    # 存储后端类型: memory（内存，默认） / pg（PostgreSQL + pgvector + AGE）
+    backend: memory
+
+    # 文件系统存储，后续考虑扩展到不同的存储形态。
+    memory_fs:
+      type: "localfs" # 当前只有这一种实现。
+      root_dir: "/tmp/llm_gateway" # 注意：不要放在某个已经被git跟踪的工程目录下
+      enable_git: true
+    # PostgreSQL 连接配置（仅 backend=pg 时生效）
+    pg:
+      dsn: null               # 完整 DSN（最高优先级），如 postgresql://user:pass@host:port/db
+      host: "127.0.0.1"
+      port: 5432
+      user: "limaoqiu"
+      password: ""
+      database: "t2"
+      pool_min_size: 2        # 连接池最小连接数
+      pool_max_size: 16       # 连接池最大连接数
+
+  for_evaluation: true

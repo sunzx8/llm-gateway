@@ -1,0 +1,2121 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Eval Dashboard</title>
+<style>
+  :root {
+    --bg-primary: #0f1117;
+    --bg-secondary: #1a1d2e;
+    --bg-card: #222640;
+    --bg-hover: #2a2f4a;
+    --bg-active: #323760;
+    --text-primary: #e8eaf0;
+    --text-secondary: #9ca3b8;
+    --text-muted: #6b7280;
+    --accent-blue: #3b82f6;
+    --accent-green: #10b981;
+    --accent-orange: #f59e0b;
+    --accent-red: #ef4444;
+    --accent-purple: #8b5cf6;
+    --accent-cyan: #06b6d4;
+    --accent-indigo: #6366f1;
+    --border-color: #2d3250;
+    --shadow: 0 4px 24px rgba(0,0,0,0.3);
+    --radius: 12px;
+    --radius-sm: 8px;
+    --transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', sans-serif;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    line-height: 1.6;
+    min-height: 100vh;
+  }
+
+  /* ── 顶部导航 ── */
+  .navbar {
+    background: var(--bg-secondary);
+    border-bottom: 1px solid var(--border-color);
+    padding: 0 32px;
+    height: 60px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    backdrop-filter: blur(12px);
+  }
+  .navbar-brand {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 18px;
+    font-weight: 700;
+    color: var(--text-primary);
+    cursor: pointer;
+  }
+  .navbar-brand .icon { font-size: 24px; }
+  .navbar-actions {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .navbar-actions .btn-refresh {
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm);
+    padding: 6px 14px;
+    color: var(--text-secondary);
+    font-size: 13px;
+    cursor: pointer;
+    transition: var(--transition);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .navbar-actions .btn-refresh:hover {
+    border-color: var(--accent-blue);
+    color: var(--text-primary);
+  }
+
+  /* ── 主容器 ── */
+  .container {
+    max-width: 1500px;
+    margin: 0 auto;
+    padding: 24px 32px;
+  }
+
+  /* ── 面包屑导航 ── */
+  .breadcrumb {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 20px;
+    font-size: 13px;
+    color: var(--text-secondary);
+  }
+  .breadcrumb a {
+    color: var(--accent-blue);
+    text-decoration: none;
+    cursor: pointer;
+    transition: var(--transition);
+  }
+  .breadcrumb a:hover { color: #60a5fa; }
+  .breadcrumb .sep { color: var(--text-muted); }
+  .breadcrumb .current { color: var(--text-primary); font-weight: 600; }
+
+  /* ── 空状态 ── */
+  .empty-state {
+    text-align: center;
+    padding: 80px 20px;
+    color: var(--text-muted);
+  }
+  .empty-state .icon { font-size: 64px; margin-bottom: 16px; }
+  .empty-state h2 { font-size: 20px; color: var(--text-secondary); margin-bottom: 8px; }
+  .empty-state p { font-size: 14px; }
+
+  /* ── 统计卡片网格 ── */
+  .stats-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 16px;
+    margin-bottom: 28px;
+  }
+  .stat-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius);
+    padding: 20px;
+    transition: var(--transition);
+  }
+  .stat-card:hover {
+    border-color: var(--accent-blue);
+    transform: translateY(-2px);
+    box-shadow: var(--shadow);
+  }
+  .stat-card .label {
+    font-size: 12px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 6px;
+  }
+  .stat-card .value {
+    font-size: 28px;
+    font-weight: 700;
+    color: var(--text-primary);
+  }
+  .stat-card .unit {
+    font-size: 13px;
+    color: var(--text-secondary);
+    margin-left: 4px;
+  }
+  .stat-card.accent-blue .value { color: var(--accent-blue); }
+  .stat-card.accent-green .value { color: var(--accent-green); }
+  .stat-card.accent-orange .value { color: var(--accent-orange); }
+  .stat-card.accent-purple .value { color: var(--accent-purple); }
+    .stat-card.accent-cyan .value { color: var(--accent-cyan); }
+    .stat-card.accent-red .value { color: var(--accent-red); }
+    .stat-card.accent-indigo .value { color: var(--accent-indigo); }
+
+  /* ── 区块标题 ── */
+  .section-title {
+    font-size: 16px;
+    font-weight: 700;
+    color: var(--text-primary);
+    margin-bottom: 16px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .section-title .badge {
+    background: var(--accent-blue);
+    color: #fff;
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-weight: 600;
+  }
+
+  /* ── 全局概览表格 ── */
+  .overview-table-wrapper {
+    overflow-x: auto;
+    margin-bottom: 28px;
+    border-radius: var(--radius);
+    border: 1px solid var(--border-color);
+  }
+  .overview-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+  }
+  .overview-table th {
+    background: var(--bg-secondary);
+    color: var(--text-secondary);
+    font-weight: 600;
+    text-align: left;
+    padding: 12px 16px;
+    border-bottom: 2px solid var(--border-color);
+    white-space: nowrap;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+  }
+  .overview-table td {
+    padding: 14px 16px;
+    border-bottom: 1px solid var(--border-color);
+    color: var(--text-primary);
+    white-space: nowrap;
+    vertical-align: middle;
+  }
+  .overview-table tr {
+    transition: var(--transition);
+    cursor: pointer;
+  }
+  .overview-table tbody tr:hover td {
+    background: var(--bg-hover);
+  }
+  .overview-table .run-id {
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    font-weight: 600;
+    color: var(--accent-blue);
+    font-size: 13px;
+  }
+  .overview-table .benchmark-name {
+    font-weight: 600;
+    color: var(--accent-cyan);
+  }
+  .overview-table .metric-cell {
+    font-weight: 700;
+    font-size: 14px;
+  }
+  .overview-table .metric-cell.good { color: var(--accent-green); }
+  .overview-table .metric-cell.medium { color: var(--accent-orange); }
+  .overview-table .metric-cell.bad { color: var(--accent-red); }
+  .overview-table .duration-cell {
+    color: var(--text-secondary);
+    font-size: 13px;
+  }
+  .overview-table .error-cell {
+    font-weight: 600;
+  }
+  .overview-table .error-cell.has-error { color: var(--accent-red); }
+  .overview-table .error-cell.no-error { color: var(--accent-green); }
+
+  /* ── 详细指标表格 ── */
+  .detail-metrics-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+  }
+  .detail-metrics-table th {
+    background: var(--bg-secondary);
+    color: var(--text-secondary);
+    font-weight: 600;
+    text-align: left;
+    padding: 10px 14px;
+    border-bottom: 2px solid var(--border-color);
+    white-space: nowrap;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+  }
+  .detail-metrics-table td {
+    padding: 12px 14px;
+    border-bottom: 1px solid var(--border-color);
+    color: var(--text-primary);
+    white-space: nowrap;
+    vertical-align: middle;
+    font-size: 13px;
+  }
+  .detail-metrics-table .clickable-row {
+    transition: var(--transition);
+    cursor: pointer;
+  }
+  .detail-metrics-table .clickable-row:hover td {
+    background: var(--bg-hover);
+  }
+  .detail-metrics-table .row-arrow {
+    color: var(--text-muted);
+    font-size: 16px;
+    text-align: center;
+    width: 30px;
+  }
+  .detail-metrics-table .clickable-row:hover .row-arrow {
+    color: var(--accent-blue);
+  }
+  .table-container {
+    overflow-x: auto;
+    margin-bottom: 28px;
+    border-radius: var(--radius);
+    border: 1px solid var(--border-color);
+  }
+
+  /* ── 进度条 ── */
+  .accuracy-bar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .accuracy-bar .bar-bg {
+    flex: 1;
+    height: 8px;
+    background: var(--bg-primary);
+    border-radius: 4px;
+    overflow: hidden;
+    min-width: 80px;
+  }
+  .accuracy-bar .bar-fill {
+    height: 100%;
+    border-radius: 4px;
+    transition: width 0.6s ease;
+  }
+  .accuracy-bar .bar-text {
+    font-weight: 700;
+    font-size: 14px;
+    min-width: 55px;
+    text-align: right;
+  }
+
+  /* ── Benchmark 卡片 ── */
+  .benchmark-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius);
+    margin-bottom: 16px;
+    overflow: hidden;
+    transition: var(--transition);
+    cursor: pointer;
+  }
+  .benchmark-card:hover {
+    border-color: var(--accent-blue);
+    box-shadow: var(--shadow);
+  }
+  .benchmark-header {
+    padding: 20px 24px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .benchmark-header .name {
+    font-size: 18px;
+    font-weight: 700;
+    color: var(--text-primary);
+  }
+  .benchmark-header .arrow {
+    color: var(--text-muted);
+    font-size: 20px;
+    transition: var(--transition);
+  }
+  .benchmark-metrics {
+    padding: 0 24px 20px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 24px;
+  }
+  .metric-item {
+    display: flex;
+    flex-direction: column;
+  }
+  .metric-item .metric-label {
+    font-size: 11px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  .metric-item .metric-value {
+    font-size: 20px;
+    font-weight: 700;
+  }
+
+  /* ── 任务统计表格 ── */
+  .stats-table-wrapper {
+    margin-bottom: 28px;
+    overflow-x: auto;
+  }
+  .stats-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+  }
+  .stats-table th {
+    background: var(--bg-secondary);
+    color: var(--text-secondary);
+    font-weight: 600;
+    text-align: left;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border-color);
+    white-space: nowrap;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+  }
+  .stats-table td {
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border-color);
+    color: var(--text-primary);
+    white-space: nowrap;
+  }
+  .stats-table tr:hover td {
+    background: var(--bg-hover);
+  }
+  .stats-table .task-type { font-weight: 600; }
+  .stats-table .task-type.ingest { color: var(--accent-blue); }
+  .stats-table .task-type.retrieve { color: var(--accent-green); }
+  .stats-table .task-type.consolidate { color: var(--accent-purple); }
+  .stats-table .task-type.all { color: var(--accent-orange); }
+
+  /* ── Conversation 列表 ── */
+  .conv-list { display: flex; flex-direction: column; gap: 8px; }
+  .conv-item {
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm);
+    padding: 14px 20px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    cursor: pointer;
+    transition: var(--transition);
+  }
+  .conv-item:hover {
+    border-color: var(--accent-blue);
+    background: var(--bg-hover);
+  }
+  .conv-item .conv-id {
+    font-weight: 600;
+    font-size: 14px;
+    color: var(--text-primary);
+    font-family: 'SF Mono', 'Fira Code', monospace;
+  }
+  .conv-item .conv-meta {
+    display: flex;
+    gap: 20px;
+    font-size: 12px;
+    color: var(--text-secondary);
+  }
+  .conv-item .conv-meta .tag {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+  }
+  /* 评测模式标签 */
+  .eval-mode-tag {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+  .eval-mode-tag.mode-mem {
+    background: rgba(139,92,246,0.15);
+    color: var(--accent-purple);
+  }
+  .eval-mode-tag.mode-fc {
+    background: rgba(6,182,212,0.15);
+    color: var(--accent-cyan);
+  }
+  .eval-mode-tag.mode-mem0 {
+    background: rgba(245,158,11,0.15);
+    color: var(--accent-orange);
+  }
+
+  .conv-item .error-tag {
+    background: rgba(239,68,68,0.15);
+    color: var(--accent-red);
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 600;
+  }
+  .conv-item .pass-rate-tag {
+    font-size: 12px;
+    font-weight: 700;
+    padding: 2px 8px;
+    border-radius: 4px;
+  }
+  .conv-item .pass-rate-tag.good {
+    background: rgba(16,185,129,0.15);
+    color: var(--accent-green);
+  }
+  .conv-item .pass-rate-tag.medium {
+    background: rgba(245,158,11,0.15);
+    color: var(--accent-orange);
+  }
+  .conv-item .pass-rate-tag.bad {
+    background: rgba(239,68,68,0.15);
+    color: var(--accent-red);
+  }
+  .conv-item .arrow {
+    color: var(--text-muted);
+    transition: var(--transition);
+  }
+  .conv-item:hover .arrow { color: var(--accent-blue); }
+
+  /* ── Conversation 详情 ── */
+  .conv-detail-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 20px;
+  }
+  .conv-error-banner {
+    background: rgba(239,68,68,0.1);
+    border: 1px solid rgba(239,68,68,0.3);
+    border-radius: var(--radius-sm);
+    padding: 12px 16px;
+    margin-bottom: 20px;
+    color: var(--accent-red);
+    font-size: 13px;
+  }
+
+  /* ── QA 对比面板 ── */
+  .qa-list { display: flex; flex-direction: column; gap: 12px; }
+  .qa-item {
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius);
+    overflow: hidden;
+    transition: var(--transition);
+  }
+  .qa-header {
+    padding: 14px 20px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    cursor: pointer;
+    transition: var(--transition);
+  }
+  .qa-header:hover { background: var(--bg-hover); }
+  .qa-header .qa-index {
+    color: #fff;
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 12px;
+    font-weight: 700;
+    flex-shrink: 0;
+  }
+  .qa-header .qa-index.passed { background: var(--accent-green); }
+  .qa-header .qa-index.failed { background: var(--accent-red); }
+  .qa-header .qa-index.unknown { background: var(--accent-blue); }
+  .qa-header .qa-status {
+    font-size: 11px;
+    font-weight: 700;
+    padding: 2px 8px;
+    border-radius: 4px;
+    margin-right: 8px;
+    flex-shrink: 0;
+  }
+  .qa-header .qa-status.passed {
+    background: rgba(16,185,129,0.15);
+    color: var(--accent-green);
+  }
+  .qa-header .qa-status.failed {
+    background: rgba(239,68,68,0.15);
+    color: var(--accent-red);
+  }
+  .qa-header .qa-question {
+    flex: 1;
+    margin: 0 14px;
+    font-size: 14px;
+    color: var(--text-primary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .qa-header .qa-type {
+    font-size: 11px;
+    color: var(--text-muted);
+    background: var(--bg-active);
+    padding: 2px 8px;
+    border-radius: 4px;
+    margin-right: 10px;
+    flex-shrink: 0;
+  }
+  .qa-header .qa-arrow {
+    color: var(--text-muted);
+    transition: var(--transition);
+    flex-shrink: 0;
+  }
+  .qa-body {
+    display: none;
+    padding: 0 20px 20px;
+    border-top: 1px solid var(--border-color);
+  }
+  .qa-body.open { display: block; }
+  .qa-section { margin-top: 14px; }
+  .qa-section-label {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 6px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .qa-section-label.question-label { color: var(--accent-cyan); }
+  .qa-section-label.reference-label { color: var(--accent-green); }
+  .qa-section-label.prediction-label { color: var(--accent-orange); }
+  .qa-section-label.memory-label { color: var(--accent-purple); }
+  .qa-section-content.memory-content {
+    background: rgba(139,92,246,0.06);
+    border: 1px solid rgba(139,92,246,0.15);
+    max-height: 300px;
+    overflow-y: auto;
+  }
+  .qa-section-content {
+    background: var(--bg-secondary);
+    border-radius: var(--radius-sm);
+    padding: 12px 16px;
+    font-size: 13px;
+    line-height: 1.7;
+    color: var(--text-primary);
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  /* ── Task Results 折叠面板 ── */
+  .task-results-section { margin-top: 20px; }
+  .task-results-toggle {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm);
+    padding: 10px 16px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    color: var(--text-secondary);
+    font-size: 13px;
+    font-weight: 600;
+    transition: var(--transition);
+    width: 100%;
+  }
+  .task-results-toggle:hover { background: var(--bg-hover); color: var(--text-primary); }
+  .task-results-body { display: none; margin-top: 8px; }
+  .task-results-body.open { display: block; }
+  .task-result-item {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm);
+    margin-bottom: 8px;
+    padding: 12px 16px;
+    font-size: 12px;
+  }
+  .task-result-item .tr-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 8px;
+  }
+  .task-result-item .tr-type {
+    font-weight: 700;
+    font-size: 12px;
+    padding: 2px 8px;
+    border-radius: 4px;
+  }
+  .task-result-item .tr-type.ingest { background: rgba(59,130,246,0.15); color: var(--accent-blue); }
+  .task-result-item .tr-type.retrieve { background: rgba(16,185,129,0.15); color: var(--accent-green); }
+  .task-result-item .tr-type.consolidate { background: rgba(139,92,246,0.15); color: var(--accent-purple); }
+  .task-result-item pre {
+    background: var(--bg-primary);
+    border-radius: 6px;
+    padding: 10px 14px;
+    overflow-x: auto;
+    font-size: 11px;
+    line-height: 1.5;
+    color: var(--text-secondary);
+    font-family: 'SF Mono', 'Fira Code', monospace;
+  }
+
+  /* ── 搜索/过滤 ── */
+  .search-bar { margin-bottom: 16px; }
+  .search-bar input {
+    width: 100%;
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm);
+    padding: 10px 16px;
+    color: var(--text-primary);
+    font-size: 14px;
+    outline: none;
+    transition: var(--transition);
+  }
+  .search-bar input::placeholder { color: var(--text-muted); }
+  .search-bar input:focus { border-color: var(--accent-blue); box-shadow: 0 0 0 3px rgba(59,130,246,0.15); }
+
+  /* ── 分页 ── */
+  .pagination {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    margin-top: 20px;
+  }
+  .pagination button {
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm);
+    padding: 6px 14px;
+    color: var(--text-secondary);
+    font-size: 13px;
+    cursor: pointer;
+    transition: var(--transition);
+  }
+  .pagination button:hover:not(:disabled) { border-color: var(--accent-blue); color: var(--text-primary); }
+  .pagination button:disabled { opacity: 0.4; cursor: not-allowed; }
+  .pagination button.active { background: var(--accent-blue); color: #fff; border-color: var(--accent-blue); }
+  .pagination .page-info { color: var(--text-muted); font-size: 13px; }
+
+  /* ── 加载动画 ── */
+  .loading {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 60px;
+    color: var(--text-muted);
+    font-size: 14px;
+    gap: 10px;
+  }
+  .spinner {
+    width: 20px;
+    height: 20px;
+    border: 2px solid var(--border-color);
+    border-top-color: var(--accent-blue);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* ── 时间标签 ── */
+  .time-tag {
+    font-size: 11px;
+    color: var(--text-muted);
+    font-family: 'SF Mono', 'Fira Code', monospace;
+  }
+
+  /* ── 响应式 ── */
+  @media (max-width: 768px) {
+    .navbar { padding: 0 16px; }
+    .container { padding: 16px; }
+    .stats-grid { grid-template-columns: repeat(2, 1fr); }
+    .benchmark-metrics { gap: 12px; }
+  }
+</style>
+</head>
+<body>
+
+<!-- 顶部导航 -->
+<nav class="navbar">
+  <div class="navbar-brand" onclick="renderOverview()">
+    <span class="icon">📊</span>
+    <span>Eval Dashboard</span>
+  </div>
+  <div class="navbar-actions">
+    <button class="btn-refresh" onclick="refreshAll()">🔄 刷新数据</button>
+  </div>
+</nav>
+
+<!-- 主内容区 -->
+<div class="container" id="app">
+  <div class="loading"><div class="spinner"></div>加载中...</div>
+</div>
+
+<script>
+// ═══════════════════════════════════════════════════════════════
+// 全局状态
+// ═══════════════════════════════════════════════════════════════
+let allResults = [];             // [{filename, data}, ...] 所有评测结果
+let currentView = 'overview';    // 'overview' | 'benchmarks' | 'conversations' | 'conversation-detail'
+let currentFileIdx = -1;         // 当前选中的文件索引
+let currentBenchmarkIdx = -1;    // 当前选中的 benchmark 索引
+let currentConvIdx = -1;
+let convSearchText = '';
+let convPage = 1;
+const CONV_PAGE_SIZE = 20;
+
+// ═══════════════════════════════════════════════════════════════
+// 初始化
+// ═══════════════════════════════════════════════════════════════
+document.addEventListener('DOMContentLoaded', () => {
+  refreshAll();
+});
+
+async function refreshAll() {
+  const app = document.getElementById('app');
+  app.innerHTML = '<div class="loading"><div class="spinner"></div>加载中...</div>';
+  allResults = [];
+
+  try {
+    const resp = await fetch('/api/results');
+    const data = await resp.json();
+    const files = data.files || [];
+
+    if (files.length === 0) {
+      app.innerHTML = '<div class="empty-state"><div class="icon">📋</div><h2>暂无评测数据</h2><p>请先运行评测脚本生成结果</p></div>';
+      return;
+    }
+
+    // 使用 /api/results 返回的摘要数据构建 allResults（避免加载大文件失败）
+    allResults = files
+      .filter(f => f.summary)
+      .map(f => ({
+        filename: f.filename,
+        data: f.summary,
+        modified_time: f.modified_time,
+        _fullDataLoaded: false,  // 标记是否已加载完整数据
+      }));
+
+    renderOverview();
+  } catch (e) {
+    app.innerHTML = `<div class="empty-state"><div class="icon">❌</div><h2>加载失败</h2><p>${e.message}</p></div>`;
+  }
+}
+
+/**
+ * 按需加载指定文件的完整数据（含 per_conversation_results）。
+ * 用于详情页面展示时调用。
+ */
+async function ensureFullDataLoaded(fileIdx) {
+  const item = allResults[fileIdx];
+  if (!item || item._fullDataLoaded) return true;
+
+  try {
+    const r = await fetch(`/api/result/${item.filename}`);
+    const d = await r.json();
+    item.data = d;
+    item._fullDataLoaded = true;
+    return true;
+  } catch (e) {
+    console.error(`加载完整数据失败 ${item.filename}:`, e);
+    return false;
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// 渲染：全局概览（首页）
+// ═══════════════════════════════════════════════════════════════
+function renderOverview() {
+  currentView = 'overview';
+  currentFileIdx = -1;
+  currentBenchmarkIdx = -1;
+  currentConvIdx = -1;
+  const app = document.getElementById('app');
+
+  if (allResults.length === 0) {
+    app.innerHTML = '<div class="empty-state"><div class="icon">📋</div><h2>暂无评测数据</h2><p>请先运行评测脚本生成结果</p></div>';
+    return;
+  }
+
+  // 构建扁平化的行数据：每个文件的每个 benchmark 一行
+  const rows = [];
+  allResults.forEach((item, fileIdx) => {
+    const results = item.data.results || (item.data.benchmark_name ? [item.data] : []);
+    const runId = item.data.eval_run_id || item.filename.replace('eval_', '').replace('.json', '');
+    const createdAt = item.data.created_at || '';
+
+    results.forEach((b, benchIdx) => {
+      const stats = normalizeStats(b.stats || {});
+      const metrics = b.metrics || {};
+
+      // 提取主要准确率指标（取 mcq_accuracy 或第一个 acc_ 开头的指标）
+      let mainAccuracy = null;
+      let mainAccuracyLabel = '';
+      if (metrics.mcq_accuracy !== undefined) {
+        mainAccuracy = metrics.mcq_accuracy;
+        mainAccuracyLabel = 'MCQ Accuracy';
+      } else {
+        for (const [k, v] of Object.entries(metrics)) {
+          if (k.startsWith('acc_') && typeof v === 'number') {
+            mainAccuracy = v;
+            mainAccuracyLabel = k;
+            break;
+          }
+        }
+      }
+      if (mainAccuracy === null) {
+        // 取第一个数值型指标
+        for (const [k, v] of Object.entries(metrics)) {
+          if (typeof v === 'number' && !k.startsWith('n_')) {
+            mainAccuracy = v;
+            mainAccuracyLabel = k;
+            break;
+          }
+        }
+      }
+
+      const isFC = stats.eval_mode === 'full_context' || stats.eval_mode === 'mem0';
+
+      rows.push({
+        fileIdx,
+        benchIdx,
+        runId,
+        createdAt,
+        filename: item.filename,
+        benchmarkName: b.benchmark_name || 'Unknown',
+        evalMode: item.data.eval_mode || 'memory',
+        mainAccuracy,
+        mainAccuracyLabel,
+        metrics,
+        elapsed: b.elapsed_seconds || 0,
+        numConversations: stats.num_conversations || 0,
+        numPredictions: stats.num_predictions || 0,
+        totalErrors: isFC ? (stats.total_errors || 0) : (stats.total_error_count || 0),
+        errorRate: stats.error_rate || 0,
+        totalRequests: isFC ? (stats.answer_api_count || 0) : (stats.total_requests || 0),
+        totalTasks: isFC ? (stats.answer_api_count || 0) : (stats.all_task_count || 0),
+        totalLatency: isFC ? (stats.answer_api_total_s || 0) : (stats.all_task_total_latency_s || (stats.all_task_total_latency_ms ? stats.all_task_total_latency_ms / 1000 : 0)),
+        totalLlmCalls: isFC ? 0 : (stats.all_task_total_llm_calls || 0),
+        totalLlmTokensK: isFC ? (((stats.total_input_tokens || 0) + (stats.total_output_tokens || 0)) / 1000) : (stats.all_task_total_llm_tokens_k || (stats.all_task_total_llm_tokens ? stats.all_task_total_llm_tokens / 1000 : 0)),
+        ingestErrors: isFC ? 0 : (stats.ingest_error_count || 0),
+        answerErrors: isFC ? (stats.total_errors || 0) : (stats.answer_error_count || 0),
+      });
+    });
+  });
+
+  let html = '';
+
+  // 面包屑
+  html += '<div class="breadcrumb"><span class="current">📊 全局概览</span></div>';
+
+  // 全局统计卡片
+  const totalRuns = allResults.length;
+  const totalBenchmarks = rows.length;
+  const avgAccuracy = rows.filter(r => r.mainAccuracy !== null).length > 0
+    ? rows.filter(r => r.mainAccuracy !== null).reduce((s, r) => s + r.mainAccuracy, 0) / rows.filter(r => r.mainAccuracy !== null).length
+    : 0;
+  const totalElapsed = rows.reduce((s, r) => s + r.elapsed, 0);
+  const totalErrorsAll = rows.reduce((s, r) => s + r.totalErrors, 0);
+  const totalRequestsAll = rows.reduce((s, r) => s + r.totalRequests, 0);
+
+  html += `
+    <div class="stats-grid">
+      <div class="stat-card accent-blue">
+        <div class="label">评测任务数</div>
+        <div class="value">${totalRuns}</div>
+      </div>
+      <div class="stat-card accent-cyan">
+        <div class="label">Benchmark 总数</div>
+        <div class="value">${totalBenchmarks}</div>
+      </div>
+      <div class="stat-card accent-green">
+        <div class="label">平均准确率</div>
+        <div class="value">${(avgAccuracy * 100).toFixed(1)}<span class="unit">%</span></div>
+      </div>
+      <div class="stat-card accent-orange">
+        <div class="label">总评测耗时</div>
+        <div class="value">${fmtDuration(totalElapsed)}</div>
+      </div>
+      <div class="stat-card accent-purple">
+        <div class="label">总请求数</div>
+        <div class="value">${fmtNum(totalRequestsAll)}</div>
+      </div>
+      <div class="stat-card accent-red">
+        <div class="label">总错误数</div>
+        <div class="value">${fmtNum(totalErrorsAll)}</div>
+      </div>
+    </div>
+  `;
+
+  // 评测结果对比表格（按评测任务粒度，每个文件一行）
+  const taskRows = [];
+  allResults.forEach((item, fileIdx) => {
+    const results = item.data.results || (item.data.benchmark_name ? [item.data] : []);
+    const runId = item.data.eval_run_id || item.filename.replace('eval_', '').replace('.json', '');
+    const createdAt = item.data.created_at || '';
+    const benchmarkCount = results.length;
+    const benchmarkNames = results.map(b => b.benchmark_name || 'Unknown');
+    const evalMode = item.data.eval_mode || 'memory';
+    const baseModel = item.data.base_model || '';
+    const memoryModel = item.data.memory_model || '';
+
+    // 汇总该任务下所有 benchmark 的统计
+    let totalConversations = 0, totalPredictions = 0, totalElapsedTask = 0;
+    let totalTasks = 0, totalLlmCalls = 0, totalLlmTokensK = 0, totalErrors = 0, totalRequests = 0;
+    let accuracies = [];
+    results.forEach(b => {
+      const stats = normalizeStats(b.stats || {});
+      totalConversations += stats.num_conversations || 0;
+      totalPredictions += stats.num_predictions || 0;
+      totalElapsedTask += b.elapsed_seconds || 0;
+      if (evalMode === 'full_context' || evalMode === 'mem0') {
+        totalTasks += stats.answer_api_count || 0;
+        totalLlmTokensK += ((stats.total_input_tokens || 0) + (stats.total_output_tokens || 0)) / 1000;
+        totalErrors += stats.total_errors || 0;
+        totalRequests += stats.total_requests || stats.answer_api_count || 0;
+      } else {
+        totalTasks += stats.all_task_count || 0;
+        totalLlmCalls += stats.all_task_total_llm_calls || 0;
+        totalLlmTokensK += stats.all_task_total_llm_tokens_k || (stats.all_task_total_llm_tokens ? stats.all_task_total_llm_tokens / 1000 : 0);
+        totalErrors += stats.total_error_count || 0;
+        totalRequests += stats.total_requests || 0;
+      }
+      // 提取准确率
+      const metrics = b.metrics || {};
+      if (metrics.mcq_accuracy !== undefined) {
+        accuracies.push(metrics.mcq_accuracy);
+      } else {
+        for (const [k, v] of Object.entries(metrics)) {
+          if (k.startsWith('acc_') && typeof v === 'number') {
+            accuracies.push(v);
+            break;
+          }
+        }
+      }
+    });
+    const avgAcc = accuracies.length > 0 ? accuracies.reduce((s, a) => s + a, 0) / accuracies.length : null;
+    const errorRate = totalRequests > 0 ? totalErrors / totalRequests : 0;
+
+    taskRows.push({
+      fileIdx,
+      runId,
+      createdAt,
+      filename: item.filename,
+      benchmarkCount,
+      benchmarkNames,
+      evalMode,
+      baseModel,
+      memoryModel,
+      avgAccuracy: avgAcc,
+      totalConversations,
+      totalPredictions,
+      elapsed: totalElapsedTask,
+      totalTasks,
+      totalLlmCalls,
+      totalLlmTokensK,
+      totalErrors,
+      totalRequests,
+      errorRate,
+    });
+  });
+
+  html += `<div class="section-title">评测结果对比 <span class="badge">${taskRows.length}</span></div>`;
+  html += `
+    <div class="overview-table-wrapper">
+      <table class="overview-table">
+        <thead>
+          <tr>
+            <th>评测 ID</th>
+            <th>模式</th>
+            <th>Base 模型</th>
+            <th>Memory 模型</th>
+            <th>时间</th>
+            <th>Benchmarks</th>
+            <th>平均准确率</th>
+            <th>Conversations</th>
+            <th>Predictions</th>
+            <th>评测耗时</th>
+            <th>总任务数</th>
+            <th>LLM 调用次数</th>
+            <th>LLM Tokens (k)</th>
+            <th>错误数</th>
+            <th>错误率</th>
+          </tr>
+        </thead>
+        <tbody>
+  `;
+
+  taskRows.forEach((r, i) => {
+    const accPct = r.avgAccuracy !== null ? (r.avgAccuracy * 100) : null;
+    const accClass = accPct === null ? '' : (accPct >= 70 ? 'good' : (accPct >= 40 ? 'medium' : 'bad'));
+    const accColor = accPct === null ? 'var(--text-muted)' : (accPct >= 70 ? 'var(--accent-green)' : (accPct >= 40 ? 'var(--accent-orange)' : 'var(--accent-red)'));
+    const errClass = r.totalErrors > 0 ? 'has-error' : 'no-error';
+    const errRatePct = (r.errorRate * 100).toFixed(1);
+    const benchNamesStr = r.benchmarkNames.join(', ');
+
+    const modeLabel = r.evalMode === 'full_context' ? '🔤 Full Context' : (r.evalMode === 'mem0' ? '🔶 Mem0' : '🧠 Memory');
+    const modeClass = r.evalMode === 'full_context' ? 'mode-fc' : (r.evalMode === 'mem0' ? 'mode-mem0' : 'mode-mem');
+    html += `
+      <tr onclick="openTaskBenchmarks(${r.fileIdx})">
+        <td class="run-id">${escHtml(r.runId)}</td>
+        <td><span class="eval-mode-tag ${modeClass}">${modeLabel}</span></td>
+        <td class="model-cell">${r.baseModel ? escHtml(r.baseModel) : '<span style="color:var(--text-muted)">-</span>'}</td>
+        <td class="model-cell">${r.memoryModel ? escHtml(r.memoryModel) : '<span style="color:var(--text-muted)">-</span>'}</td>
+        <td class="time-tag">${fmtTime(r.createdAt)}</td>
+        <td class="benchmark-name">${escHtml(benchNamesStr)} <span class="badge">${r.benchmarkCount}</span></td>
+        <td>
+          ${accPct !== null ? `
+            <div class="accuracy-bar">
+              <div class="bar-bg">
+                <div class="bar-fill" style="width:${accPct}%;background:${accColor}"></div>
+              </div>
+              <span class="bar-text metric-cell ${accClass}">${accPct.toFixed(1)}%</span>
+            </div>
+          ` : '<span style="color:var(--text-muted)">-</span>'}
+        </td>
+        <td>${fmtNum(r.totalConversations)}</td>
+        <td>${fmtNum(r.totalPredictions)}</td>
+        <td class="duration-cell">${fmtDuration(r.elapsed)}</td>
+        <td>${fmtNum(r.totalTasks)}</td>
+        <td>${fmtNum(r.totalLlmCalls)}</td>
+        <td>${fmtNum(r.totalLlmTokensK)}<span class="unit">k</span></td>
+        <td class="error-cell ${errClass}">${r.totalErrors > 0 ? r.totalErrors : '✓'}</td>
+        <td class="error-cell ${errClass}">${r.totalErrors > 0 ? errRatePct + '%' : '0%'}</td>
+      </tr>
+    `;
+  });
+
+  html += '</tbody></table></div>';
+
+  app.innerHTML = html;
+}
+
+function getAccuracyColor(v) {
+  const pct = v * 100;
+  if (pct >= 70) return 'var(--accent-green)';
+  if (pct >= 40) return 'var(--accent-orange)';
+  return 'var(--accent-red)';
+}
+
+// ═══════════════════════════════════════════════════════════════
+// 从概览进入评测任务的 Benchmark 列表
+// ═══════════════════════════════════════════════════════════════
+function openTaskBenchmarks(fileIdx) {
+  currentFileIdx = fileIdx;
+  currentBenchmarkIdx = -1;
+  currentView = 'benchmarks';
+  renderBenchmarkList();
+}
+
+// ═══════════════════════════════════════════════════════════════
+// 渲染：评测任务的 Benchmark 列表
+// ═══════════════════════════════════════════════════════════════
+function renderBenchmarkList() {
+  const app = document.getElementById('app');
+  const item = allResults[currentFileIdx];
+  const results = item.data.results || (item.data.benchmark_name ? [item.data] : []);
+  const runId = item.data.eval_run_id || item.filename.replace('eval_', '').replace('.json', '');
+  const createdAt = item.data.created_at || '';
+
+  let html = '';
+
+  // 面包屑
+  const baseModel = item.data.base_model || '';
+  const memoryModel = item.data.memory_model || '';
+  const modelTags = [
+    baseModel ? `<span class="model-tag" style="margin-left:8px;padding:2px 8px;border-radius:4px;background:var(--bg-tertiary);font-size:12px;">🤖 Base: ${escHtml(baseModel)}</span>` : '',
+    memoryModel ? `<span class="model-tag" style="margin-left:8px;padding:2px 8px;border-radius:4px;background:var(--bg-tertiary);font-size:12px;">🧠 Memory: ${escHtml(memoryModel)}</span>` : '',
+  ].filter(Boolean).join('');
+  html += `
+    <div class="breadcrumb">
+      <a onclick="renderOverview()">📊 全局概览</a>
+      <span class="sep">›</span>
+      <span class="current">📋 评测任务: ${escHtml(runId)} <span class="time-tag" style="margin-left:8px">${fmtTime(createdAt)}</span>${modelTags}</span>
+    </div>
+  `;
+
+  // 任务概览统计卡片
+  const evalMode = item.data.eval_mode || 'memory';
+  const isFC = evalMode === 'full_context' || evalMode === 'mem0';
+  let totalConversations = 0, totalPredictions = 0, totalElapsedTask = 0;
+  let totalTasks = 0, totalLlmCalls = 0, totalLlmTokensK = 0, totalErrors = 0, totalRequests = 0;
+  let accuracies = [];
+  results.forEach(b => {
+    const stats = normalizeStats(b.stats || {});
+    totalConversations += stats.num_conversations || 0;
+    totalPredictions += stats.num_predictions || 0;
+    totalElapsedTask += b.elapsed_seconds || 0;
+    if (isFC) {
+      totalTasks += stats.answer_api_count || 0;
+      totalLlmTokensK += ((stats.total_input_tokens || 0) + (stats.total_output_tokens || 0)) / 1000;
+      totalErrors += stats.total_errors || 0;
+      totalRequests += stats.answer_api_count || 0;
+    } else {
+      totalTasks += stats.all_task_count || 0;
+      totalLlmCalls += stats.all_task_total_llm_calls || 0;
+      totalLlmTokensK += stats.all_task_total_llm_tokens_k || (stats.all_task_total_llm_tokens ? stats.all_task_total_llm_tokens / 1000 : 0);
+      totalErrors += stats.total_error_count || 0;
+      totalRequests += stats.total_requests || 0;
+    }
+    const metrics = b.metrics || {};
+    if (metrics.mcq_accuracy !== undefined) {
+      accuracies.push(metrics.mcq_accuracy);
+    } else {
+      for (const [k, v] of Object.entries(metrics)) {
+        if (k.startsWith('acc_') && typeof v === 'number') {
+          accuracies.push(v);
+          break;
+        }
+      }
+    }
+  });
+  const avgAcc = accuracies.length > 0 ? accuracies.reduce((s, a) => s + a, 0) / accuracies.length : 0;
+
+  html += `
+    <div class="stats-grid">
+      <div class="stat-card accent-blue">
+        <div class="label">Benchmark 数</div>
+        <div class="value">${results.length}</div>
+      </div>
+      <div class="stat-card accent-green">
+        <div class="label">平均准确率</div>
+        <div class="value">${(avgAcc * 100).toFixed(1)}<span class="unit">%</span></div>
+      </div>
+      <div class="stat-card accent-cyan">
+        <div class="label">Conversations</div>
+        <div class="value">${fmtNum(totalConversations)}</div>
+      </div>
+      <div class="stat-card accent-orange">
+        <div class="label">总评测耗时</div>
+        <div class="value">${fmtDuration(totalElapsedTask)}</div>
+      </div>
+      <div class="stat-card accent-indigo">
+        <div class="label">LLM 调用次数</div>
+        <div class="value">${fmtNum(totalLlmCalls)}</div>
+      </div>
+      <div class="stat-card accent-purple">
+        <div class="label">LLM Tokens</div>
+        <div class="value">${fmtNum(totalLlmTokensK)}<span class="unit">k</span></div>
+      </div>
+      <div class="stat-card accent-red">
+        <div class="label">总错误数</div>
+        <div class="value">${fmtNum(totalErrors)}</div>
+      </div>
+    </div>
+  `;
+
+  // Benchmark 列表表格
+  html += `<div class="section-title">Benchmark 列表 <span class="badge">${results.length}</span></div>`;
+  html += `
+    <div class="overview-table-wrapper">
+      <table class="overview-table">
+        <thead>
+          <tr>
+            <th>Benchmark</th>
+            <th>准确率</th>
+            <th>Conversations</th>
+            <th>Predictions</th>
+            <th>评测耗时</th>
+            <th>总任务数</th>
+            <th>LLM 调用次数</th>
+            <th>LLM Tokens (k)</th>
+            <th>错误数</th>
+            <th>错误率</th>
+          </tr>
+        </thead>
+        <tbody>
+  `;
+
+  results.forEach((b, benchIdx) => {
+    const stats = normalizeStats(b.stats || {});
+    const metrics = b.metrics || {};
+    let mainAccuracy = null;
+    if (metrics.mcq_accuracy !== undefined) {
+      mainAccuracy = metrics.mcq_accuracy;
+    } else {
+      for (const [k, v] of Object.entries(metrics)) {
+        if (k.startsWith('acc_') && typeof v === 'number') {
+          mainAccuracy = v;
+          break;
+        }
+      }
+    }
+    const accPct = mainAccuracy !== null ? (mainAccuracy * 100) : null;
+    const accColor = accPct === null ? 'var(--text-muted)' : (accPct >= 70 ? 'var(--accent-green)' : (accPct >= 40 ? 'var(--accent-orange)' : 'var(--accent-red)'));
+    const accClass = accPct === null ? '' : (accPct >= 70 ? 'good' : (accPct >= 40 ? 'medium' : 'bad'));
+    const errCount = isFC ? (stats.total_errors || 0) : (stats.total_error_count || 0);
+    const errRate = stats.error_rate || 0;
+    const errClass = errCount > 0 ? 'has-error' : 'no-error';
+    const taskCount = isFC ? (stats.answer_api_count || 0) : (stats.all_task_count || 0);
+    const tokensK = isFC ? (((stats.total_input_tokens || 0) + (stats.total_output_tokens || 0)) / 1000).toFixed(1) : fmtNum(stats.all_task_total_llm_tokens_k || 0);
+    const llmCalls = isFC ? 0 : (stats.all_task_total_llm_calls || 0);
+
+    html += `
+      <tr onclick="openBenchmarkFromOverview(${currentFileIdx}, ${benchIdx})">
+        <td class="benchmark-name"><strong>${escHtml(b.benchmark_name || 'Unknown')}</strong></td>
+        <td>
+          ${accPct !== null ? `
+            <div class="accuracy-bar">
+              <div class="bar-bg">
+                <div class="bar-fill" style="width:${accPct}%;background:${accColor}"></div>
+              </div>
+              <span class="bar-text metric-cell ${accClass}">${accPct.toFixed(1)}%</span>
+            </div>
+          ` : '<span style="color:var(--text-muted)">-</span>'}
+        </td>
+        <td>${fmtNum(stats.num_conversations || 0)}</td>
+        <td>${fmtNum(stats.num_predictions || 0)}</td>
+        <td class="duration-cell">${fmtDuration(b.elapsed_seconds || 0)}</td>
+        <td>${fmtNum(taskCount)}</td>
+        <td>${fmtNum(llmCalls)}</td>
+        <td>${tokensK}<span class="unit">k</span></td>
+        <td class="error-cell ${errClass}">${errCount > 0 ? errCount : '✓'}</td>
+        <td class="error-cell ${errClass}">${errCount > 0 ? (errRate * 100).toFixed(1) + '%' : '0%'}</td>
+      </tr>
+    `;
+  });
+
+  html += '</tbody></table></div>';
+
+  // 各 Benchmark 的 Metrics 详细对比
+  const allMetricKeys = [];
+  const metricKeySet = new Set();
+  results.forEach(b => {
+    Object.entries(b.metrics || {}).forEach(([k, v]) => {
+      if (typeof v === 'number' && !metricKeySet.has(k)) {
+        metricKeySet.add(k);
+        allMetricKeys.push(k);
+      }
+    });
+  });
+
+  if (allMetricKeys.length > 0) {
+    html += '<div class="section-title">Metrics 详细对比</div>';
+    html += '<div class="table-container"><table class="data-table detail-metrics-table">';
+    html += '<thead><tr><th>Benchmark</th>';
+    allMetricKeys.forEach(k => { html += `<th>${escHtml(k)}</th>`; });
+    html += '<th>耗时</th><th></th></tr></thead><tbody>';
+
+    results.forEach((b, benchIdx) => {
+      const metrics = b.metrics || {};
+      html += `<tr class="clickable-row" onclick="openBenchmarkFromOverview(${currentFileIdx}, ${benchIdx})">`;
+      html += `<td><strong>${escHtml(b.benchmark_name || 'Unknown')}</strong></td>`;
+      allMetricKeys.forEach(k => {
+        const v = metrics[k];
+        if (v !== undefined && typeof v === 'number') {
+          const isAcc = k.startsWith('acc_') || k === 'mcq_accuracy';
+          const color = isAcc ? getAccuracyColor(v) : 'var(--text-secondary)';
+          const display = isAcc ? (v * 100).toFixed(1) + '%' :
+                          k.startsWith('n_') ? Math.round(v) :
+                          v.toFixed(4);
+          html += `<td style="color:${color};font-weight:${isAcc ? '600' : '400'}">${display}</td>`;
+        } else {
+          html += '<td style="color:var(--text-muted)">—</td>';
+        }
+      });
+      html += `<td style="color:var(--text-secondary)">${fmtDuration(b.elapsed_seconds || 0)}</td>`;
+      html += '<td class="row-arrow">→</td>';
+      html += '</tr>';
+    });
+
+    html += '</tbody></table></div>';
+  }
+
+  app.innerHTML = html;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// 从概览进入 Benchmark 详情
+// ═══════════════════════════════════════════════════════════════
+async function openBenchmarkFromOverview(fileIdx, benchIdx) {
+  currentFileIdx = fileIdx;
+  currentBenchmarkIdx = benchIdx;
+  currentView = 'conversations';
+  convSearchText = '';
+  convPage = 1;
+
+  // 按需加载完整数据（含 per_conversation_results）
+  const app = document.getElementById('app');
+  app.innerHTML = '<div class="loading"><div class="spinner"></div>加载详情数据...</div>';
+  const ok = await ensureFullDataLoaded(fileIdx);
+  if (!ok) {
+    app.innerHTML = '<div class="empty-state"><div class="icon">❌</div><h2>加载失败</h2><p>无法加载完整评测数据</p><a onclick="renderOverview()">返回概览</a></div>';
+    return;
+  }
+  renderConversations();
+}
+
+// ═══════════════════════════════════════════════════════════════
+// 渲染：Benchmark 详情（Conversation 列表）
+// ═══════════════════════════════════════════════════════════════
+function renderConversations() {
+  const app = document.getElementById('app');
+  const item = allResults[currentFileIdx];
+  const results = item.data.results || (item.data.benchmark_name ? [item.data] : []);
+  const b = results[currentBenchmarkIdx];
+  const convs = b.per_conversation_results || [];
+  const stats = b.stats || {};
+  const runId = item.data.eval_run_id || item.filename.replace('eval_', '').replace('.json', '');
+
+  let html = '';
+
+  // 面包屑
+  html += `
+    <div class="breadcrumb">
+      <a onclick="renderOverview()">📊 全局概览</a>
+      <span class="sep">›</span>
+      <a onclick="openTaskBenchmarks(${currentFileIdx})">📋 ${escHtml(runId)}</a>
+      <span class="sep">›</span>
+      <span class="current">${escHtml(b.benchmark_name)} <span class="time-tag" style="margin-left:8px">${escHtml(runId)}</span></span>
+    </div>
+  `;
+
+  // Metrics 卡片
+  html += renderOverviewStats(b);
+
+  // 任务统计表格
+  html += '<div class="section-title">任务统计</div>';
+  html += renderTaskStatsTable(stats);
+
+  // 错误统计（如果有错误）
+  const fcMode = stats.eval_mode === 'full_context' || stats.eval_mode === 'mem0';
+  const errTotal = fcMode ? (stats.total_errors || 0) : (stats.total_error_count || 0);
+  if (errTotal > 0) {
+    html += '<div class="section-title">错误统计</div>';
+    if (fcMode) {
+      html += `
+        <div class="stats-grid">
+          <div class="stat-card accent-red">
+            <div class="label">总错误数</div>
+            <div class="value">${errTotal}</div>
+          </div>
+          <div class="stat-card accent-red">
+            <div class="label">错误率</div>
+            <div class="value">${((stats.error_rate || 0) * 100).toFixed(1)}<span class="unit">%</span></div>
+          </div>
+        </div>
+      `;
+    } else {
+      html += `
+        <div class="stats-grid">
+          <div class="stat-card accent-red">
+            <div class="label">总错误数</div>
+            <div class="value">${stats.total_error_count}</div>
+          </div>
+          <div class="stat-card accent-red">
+            <div class="label">错误率</div>
+            <div class="value">${(stats.error_rate * 100).toFixed(1)}<span class="unit">%</span></div>
+          </div>
+          <div class="stat-card accent-orange">
+            <div class="label">Ingest 错误</div>
+            <div class="value">${stats.ingest_error_count || 0}</div>
+          </div>
+          <div class="stat-card accent-orange">
+            <div class="label">Answer 错误</div>
+            <div class="value">${stats.answer_error_count || 0}</div>
+          </div>
+        </div>
+      `;
+    }
+  }
+
+  // Conversation 列表
+  html += `<div class="section-title">Conversations <span class="badge">${convs.length}</span></div>`;
+
+  // 搜索
+  html += `
+    <div class="search-bar">
+      <input type="text" placeholder="🔍 搜索 Conversation ID..." value="${escHtml(convSearchText)}" oninput="onConvSearch(this.value)">
+    </div>
+  `;
+
+  // 过滤
+  let filtered = convs;
+  if (convSearchText) {
+    const q = convSearchText.toLowerCase();
+    filtered = convs.filter(c => c.conv_id.toLowerCase().includes(q));
+  }
+
+  // 分页
+  const totalPages = Math.max(1, Math.ceil(filtered.length / CONV_PAGE_SIZE));
+  if (convPage > totalPages) convPage = totalPages;
+  const start = (convPage - 1) * CONV_PAGE_SIZE;
+  const pageItems = filtered.slice(start, start + CONV_PAGE_SIZE);
+
+  html += '<div class="conv-list">';
+  pageItems.forEach((c) => {
+    const realIdx = convs.indexOf(c);
+    const predCount = (c.predictions || []).length;
+    const hasError = c.error && c.error !== '';
+    const passFlags = c.qa_pass_flags || [];
+    const mcqAcc = c.mcq_accuracy !== undefined ? c.mcq_accuracy : (passFlags.length > 0 ? passFlags.filter(f => f).length / passFlags.length : null);
+    const mcqAccPct = mcqAcc !== null ? (mcqAcc * 100).toFixed(0) : null;
+    const mcqAccClass = mcqAcc === null ? '' : (mcqAcc >= 0.7 ? 'good' : (mcqAcc >= 0.4 ? 'medium' : 'bad'));
+    const passedCount = passFlags.filter(f => f).length;
+    const failedCount = passFlags.length - passedCount;
+    html += `
+      <div class="conv-item" onclick="openConversation(${realIdx})">
+        <div style="display:flex;align-items:center;gap:12px;flex:1;min-width:0">
+          <div class="conv-id">${escHtml(c.conv_id)}</div>
+          ${hasError ? '<span class="error-tag">ERROR</span>' : ''}
+          ${mcqAccPct !== null ? `<span class="pass-rate-tag ${mcqAccClass}">${mcqAccPct}% (${passedCount}/${passFlags.length})</span>` : ''}
+        </div>
+        <div class="conv-meta">
+          <span class="tag">📝 ${predCount} QA</span>
+          ${failedCount > 0 ? `<span class="tag" style="color:var(--accent-red)">❌ ${failedCount} 未通过</span>` : ''}
+          <span class="tag">⏱ ${fmtDuration(c.elapsed_seconds)}</span>
+          ${fcMode ? `
+            <span class="tag">🔤 ${(c.answer_elapsed_list || []).length} answers</span>
+            <span class="tag">📊 ${fmtNum(((c.input_tokens_list || []).reduce((s,v) => s+v, 0) / 1000).toFixed(1))}k tokens</span>
+          ` : `
+            <span class="tag">📥 ${(c.ingest_stats || []).length} ingest</span>
+            <span class="tag">🔍 ${(c.retrieve_stats || []).length} retrieve</span>
+          `}
+        </div>
+        <div class="arrow">→</div>
+      </div>
+    `;
+  });
+  html += '</div>';
+
+  // 分页控件
+  if (totalPages > 1) {
+    html += `
+      <div class="pagination">
+        <button onclick="goConvPage(1)" ${convPage === 1 ? 'disabled' : ''}>首页</button>
+        <button onclick="goConvPage(${convPage - 1})" ${convPage === 1 ? 'disabled' : ''}>‹ 上一页</button>
+        <span class="page-info">${convPage} / ${totalPages}（共 ${filtered.length} 条）</span>
+        <button onclick="goConvPage(${convPage + 1})" ${convPage === totalPages ? 'disabled' : ''}>下一页 ›</button>
+        <button onclick="goConvPage(${totalPages})" ${convPage === totalPages ? 'disabled' : ''}>末页</button>
+      </div>
+    `;
+  }
+
+  app.innerHTML = html;
+}
+
+function renderOverviewStats(b) {
+  const s = normalizeStats(b.stats || {});
+  const isFC = s.eval_mode === 'full_context' || s.eval_mode === 'mem0';
+  const isMem0 = s.eval_mode === 'mem0';
+
+  if (isFC) {
+    // Full Context / Mem0 模式：展示 Answer API 统计
+    return `
+      <div class="stats-grid">
+        <div class="stat-card accent-blue">
+          <div class="label">Answer API 调用数</div>
+          <div class="value">${s.answer_api_count || 0}</div>
+        </div>
+        <div class="stat-card accent-green">
+          <div class="label">总耗时</div>
+          <div class="value">${fmtNum(s.answer_api_total_s)}<span class="unit">s</span></div>
+        </div>
+        <div class="stat-card accent-orange">
+          <div class="label">平均耗时</div>
+          <div class="value">${fmtNum(s.answer_api_avg_s)}<span class="unit">s</span></div>
+        </div>
+        <div class="stat-card accent-red">
+          <div class="label">P90 耗时</div>
+          <div class="value">${fmtNum(s.answer_api_p90_s)}<span class="unit">s</span></div>
+        </div>
+        <div class="stat-card accent-purple">
+          <div class="label">总 Tokens</div>
+          <div class="value">${fmtNum(Math.round(((s.total_input_tokens || 0) + (s.total_output_tokens || 0)) / 1000))}<span class="unit">k</span></div>
+        </div>
+        ${isMem0 ? `
+          <div class="stat-card accent-cyan">
+            <div class="label">记忆总数</div>
+            <div class="value">${fmtNum(s.total_memories_added || 0)}</div>
+          </div>
+          <div class="stat-card accent-cyan">
+            <div class="label">平均检索记忆数</div>
+            <div class="value">${fmtNum(s.avg_memories_per_search || 0)}</div>
+          </div>
+        ` : `
+          <div class="stat-card accent-cyan">
+            <div class="label">平均输入 Tokens</div>
+            <div class="value">${fmtNum(s.avg_input_tokens_per_question || 0)}</div>
+          </div>
+        `}
+        <div class="stat-card accent-red">
+          <div class="label">评测耗时</div>
+          <div class="value">${fmtDuration(b.elapsed_seconds)}</div>
+        </div>
+      </div>
+    `;
+  }
+
+  return `
+    <div class="stats-grid">
+      <div class="stat-card accent-blue">
+        <div class="label">Answer API 调用数</div>
+        <div class="value">${s.answer_api_count || 0}</div>
+      </div>
+      <div class="stat-card accent-green">
+        <div class="label">Answer 平均耗时</div>
+        <div class="value">${fmtNum(s.answer_api_avg_s)}<span class="unit">s</span></div>
+      </div>
+      <div class="stat-card accent-orange">
+        <div class="label">Answer P90 耗时</div>
+        <div class="value">${fmtNum(s.answer_api_p90_s)}<span class="unit">s</span></div>
+      </div>
+      <div class="stat-card accent-indigo">
+        <div class="label">LLM 调用次数</div>
+        <div class="value">${fmtNum(s.all_task_total_llm_calls)}</div>
+      </div>
+      <div class="stat-card accent-purple">
+        <div class="label">LLM Tokens</div>
+        <div class="value">${fmtNum(s.all_task_total_llm_tokens_k)}<span class="unit">k</span></div>
+      </div>
+      <div class="stat-card accent-cyan">
+        <div class="label">工具调用</div>
+        <div class="value">${fmtNum(s.all_task_total_tool_calls)}</div>
+      </div>
+      <div class="stat-card accent-green">
+        <div class="label">FS 访问</div>
+        <div class="value">${fmtNum(s.all_task_total_fs_access)}</div>
+      </div>
+      <div class="stat-card accent-orange">
+        <div class="label">Vec 访问</div>
+        <div class="value">${fmtNum(s.all_task_total_vec_access)}</div>
+      </div>
+      <div class="stat-card accent-purple">
+        <div class="label">Graph 访问</div>
+        <div class="value">${fmtNum(s.all_task_total_graph_access)}</div>
+      </div>
+      <div class="stat-card accent-red">
+        <div class="label">评测耗时</div>
+        <div class="value">${fmtDuration(b.elapsed_seconds)}</div>
+      </div>
+    </div>
+  `;
+}
+
+/**
+ * 标准化 stats 字段名：兼容旧版本 JSON 中的 _ms/_tokens 后缀。
+ * 将旧字段名（如 ingest_total_latency_ms）转换为新字段名（如 ingest_total_latency_s），
+ * 同时进行单位换算（ms→s, tokens→k）。
+ */
+function normalizeStats(stats) {
+  if (!stats || typeof stats !== 'object') return stats;
+  const normalized = { ...stats };
+  const prefixes = ['ingest', 'retrieve', 'consolidate', 'all_task'];
+  const latencyFields = ['total_latency', 'total_llm_latency', 'total_tool_latency', 'max_latency', 'max_llm_latency', 'max_tool_latency'];
+  const tokenFields = ['total_llm_tokens', 'max_llm_tokens'];
+
+  prefixes.forEach(prefix => {
+    // 耗时字段：_ms → _s（除以 1000）
+    latencyFields.forEach(field => {
+      const newKey = `${prefix}_${field}_s`;
+      const oldKey = `${prefix}_${field}_ms`;
+      if (normalized[newKey] === undefined && normalized[oldKey] !== undefined) {
+        normalized[newKey] = normalized[oldKey] / 1000;
+      }
+    });
+    // Token 字段：原始数量 → _k（除以 1000）
+    tokenFields.forEach(field => {
+      const newKey = `${prefix}_${field}_k`;
+      const oldKey = `${prefix}_${field}`;
+      if (normalized[newKey] === undefined && normalized[oldKey] !== undefined) {
+        normalized[newKey] = normalized[oldKey] / 1000;
+      }
+    });
+  });
+  return normalized;
+}
+
+function renderTaskStatsTable(rawStats) {
+  const stats = normalizeStats(rawStats);
+  const isFC = stats.eval_mode === 'full_context' || stats.eval_mode === 'mem0';
+  const isMem0 = stats.eval_mode === 'mem0';
+
+  if (isFC) {
+    // Full Context / Mem0 模式：展示统计表格
+    let html = `
+      <div class="stats-table-wrapper">
+        <table class="stats-table">
+          <thead>
+            <tr>
+              <th>指标</th>
+              <th>数值</th>
+            </tr>
+          </thead>
+          <tbody>
+    `;
+    if (isMem0) {
+      // Mem0 特有统计
+      html += `
+            <tr><td colspan="2" style="font-weight:600;background:rgba(245,158,11,0.08)">📥 Mem0 Ingest (mem0.add)</td></tr>
+            <tr><td>Ingest 次数</td><td>${fmtNum(stats.ingest_count)}</td></tr>
+            <tr><td>Ingest 总耗时 (s)</td><td>${fmtNum(stats.ingest_total_s)}</td></tr>
+            <tr><td>Ingest 平均耗时 (s)</td><td>${fmtNum(stats.ingest_avg_s)}</td></tr>
+            <tr><td>Ingest 最大耗时 (s)</td><td>${fmtNum(stats.ingest_max_s)}</td></tr>
+            <tr><td colspan="2" style="font-weight:600;background:rgba(245,158,11,0.08)">🔍 Mem0 Search (mem0.search)</td></tr>
+            <tr><td>Search 次数</td><td>${fmtNum(stats.search_count)}</td></tr>
+            <tr><td>Search 总耗时 (s)</td><td>${fmtNum(stats.search_total_s)}</td></tr>
+            <tr><td>Search 平均耗时 (s)</td><td>${fmtNum(stats.search_avg_s)}</td></tr>
+            <tr><td>Search 最大耗时 (s)</td><td>${fmtNum(stats.search_max_s)}</td></tr>
+            <tr><td colspan="2" style="font-weight:600;background:rgba(245,158,11,0.08)">🧠 记忆统计</td></tr>
+            <tr><td>新增记忆总数</td><td>${fmtNum(stats.total_memories_added)}</td></tr>
+            <tr><td>检索记忆总数</td><td>${fmtNum(stats.total_memories_retrieved)}</td></tr>
+            <tr><td>平均每次检索记忆数</td><td>${fmtNum(stats.avg_memories_per_search)}</td></tr>
+            <tr><td colspan="2" style="font-weight:600;background:rgba(245,158,11,0.08)">🤖 LLM Generate (纯生成)</td></tr>
+            <tr><td>LLM 调用次数</td><td>${fmtNum(stats.llm_generate_count)}</td></tr>
+            <tr><td>LLM 总耗时 (s)</td><td>${fmtNum(stats.llm_generate_total_s)}</td></tr>
+            <tr><td>LLM 平均耗时 (s)</td><td>${fmtNum(stats.llm_generate_avg_s)}</td></tr>
+            <tr><td>LLM 最大耗时 (s)</td><td>${fmtNum(stats.llm_generate_max_s)}</td></tr>
+      `;
+    }
+    html += `
+            <tr><td colspan="2" style="font-weight:600;background:rgba(99,102,241,0.08)">📊 Answer 完整耗时 (search + llm)</td></tr>
+            <tr><td>Answer 调用次数</td><td>${fmtNum(stats.answer_api_count)}</td></tr>
+            <tr><td>Answer 总耗时 (s)</td><td>${fmtNum(stats.answer_api_total_s)}</td></tr>
+            <tr><td>Answer 平均耗时 (s)</td><td>${fmtNum(stats.answer_api_avg_s)}</td></tr>
+            <tr><td>Answer P90 耗时 (s)</td><td>${fmtNum(stats.answer_api_p90_s)}</td></tr>
+            <tr><td>Answer 最大耗时 (s)</td><td>${fmtNum(stats.answer_api_max_s)}</td></tr>
+            <tr><td>总输入 Tokens</td><td>${fmtNum(stats.total_input_tokens)}</td></tr>
+            <tr><td>总输出 Tokens</td><td>${fmtNum(stats.total_output_tokens)}</td></tr>
+            <tr><td>总 Tokens</td><td>${fmtNum(stats.total_tokens)}</td></tr>
+            <tr><td>平均输入 Tokens / 问题</td><td>${fmtNum(stats.avg_input_tokens_per_question)}</td></tr>
+            <tr><td>错误数</td><td>${fmtNum(stats.total_errors)}</td></tr>
+            <tr><td>错误率</td><td>${stats.error_rate !== undefined ? (stats.error_rate * 100).toFixed(2) + '%' : '0%'}</td></tr>
+          </tbody>
+        </table>
+      </div>
+    `;
+    return html;
+  }
+
+  // Memory 模式：展示 ingest/retrieve/consolidate 任务统计
+  const taskTypes = [
+    { key: 'ingest', label: 'Ingest', cls: 'ingest' },
+    { key: 'retrieve', label: 'Retrieve', cls: 'retrieve' },
+    { key: 'consolidate', label: 'Consolidate', cls: 'consolidate' },
+  ];
+
+  let html = `
+    <div class="stats-table-wrapper">
+      <table class="stats-table">
+        <thead>
+          <tr>
+            <th>任务类型</th>
+            <th>次数</th>
+            <th>总耗时 (s)</th>
+            <th>LLM 调用次数</th>
+            <th>LLM 总耗时 (s)</th>
+            <th>LLM Tokens (k)</th>
+            <th>Messages 数</th>
+            <th>工具调用次数</th>
+            <th>工具调用耗时 (s)</th>
+            <th>FS 访问</th>
+            <th>Vec 访问</th>
+            <th>Graph 访问</th>
+            <th>最大耗时 (s)</th>
+            <th>最大耗时 Messages</th>
+            <th>最大 LLM 调用</th>
+            <th>最大 LLM 耗时 (s)</th>
+            <th>最大 LLM Tokens (k)</th>
+            <th>最大工具调用</th>
+            <th>最大工具耗时 (s)</th>
+          </tr>
+        </thead>
+        <tbody>
+  `;
+
+  taskTypes.forEach(t => {
+    html += `
+      <tr>
+        <td class="task-type ${t.cls}">${t.label}</td>
+        <td>${fmtNum(stats[t.key + '_count'])}</td>
+        <td>${fmtNum(stats[t.key + '_total_latency_s'])}</td>
+        <td>${fmtNum(stats[t.key + '_total_llm_calls'])}</td>
+        <td>${fmtNum(stats[t.key + '_total_llm_latency_s'])}</td>
+        <td>${fmtNum(stats[t.key + '_total_llm_tokens_k'])}</td>
+        <td>${fmtNum(stats[t.key + '_total_messages_count'])}</td>
+        <td>${fmtNum(stats[t.key + '_total_tool_calls'])}</td>
+        <td>${fmtNum(stats[t.key + '_total_tool_latency_s'])}</td>
+        <td>${fmtNum(stats[t.key + '_total_fs_access'])}</td>
+        <td>${fmtNum(stats[t.key + '_total_vec_access'])}</td>
+        <td>${fmtNum(stats[t.key + '_total_graph_access'])}</td>
+        <td>${fmtNum(stats[t.key + '_max_latency_s'])}</td>
+        <td>${fmtNum(stats[t.key + '_max_latency_messages_count'])}</td>
+        <td>${fmtNum(stats[t.key + '_max_llm_calls'])}</td>
+        <td>${fmtNum(stats[t.key + '_max_llm_latency_s'])}</td>
+        <td>${fmtNum(stats[t.key + '_max_llm_tokens_k'])}</td>
+        <td>${fmtNum(stats[t.key + '_max_tool_calls'])}</td>
+        <td>${fmtNum(stats[t.key + '_max_tool_latency_s'])}</td>
+      </tr>
+    `;
+  });
+
+  // 全部汇总行
+  html += `
+      <tr style="font-weight:700;border-top:2px solid var(--border-color)">
+        <td class="task-type all">全部</td>
+        <td>${fmtNum(stats.all_task_count)}</td>
+        <td>${fmtNum(stats.all_task_total_latency_s)}</td>
+        <td>${fmtNum(stats.all_task_total_llm_calls)}</td>
+        <td>${fmtNum(stats.all_task_total_llm_latency_s)}</td>
+        <td>${fmtNum(stats.all_task_total_llm_tokens_k)}</td>
+        <td></td>
+        <td>${fmtNum(stats.all_task_total_tool_calls)}</td>
+        <td>${fmtNum(stats.all_task_total_tool_latency_s)}</td>
+        <td>${fmtNum(stats.all_task_total_fs_access)}</td>
+        <td>${fmtNum(stats.all_task_total_vec_access)}</td>
+        <td>${fmtNum(stats.all_task_total_graph_access)}</td>
+        <td colspan="7"></td>
+      </tr>
+    </tbody></table></div>
+  `;
+
+  // Answer API 耗时统计
+  html += `
+    <div class="stats-table-wrapper" style="margin-top:16px">
+      <table class="stats-table">
+        <thead>
+          <tr>
+            <th colspan="2" style="text-align:left">📊 Answer API 耗时统计</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td>Answer 调用次数</td><td>${fmtNum(stats.answer_api_count)}</td></tr>
+          <tr><td>Answer 总耗时 (s)</td><td>${fmtNum(stats.answer_api_total_s)}</td></tr>
+          <tr><td>Answer 平均耗时 (s)</td><td>${fmtNum(stats.answer_api_avg_s)}</td></tr>
+          <tr><td>Answer P90 耗时 (s)</td><td>${fmtNum(stats.answer_api_p90_s)}</td></tr>
+          <tr><td>Answer 最大耗时 (s)</td><td>${fmtNum(stats.answer_api_max_s)}</td></tr>
+          <tr><td>错误数</td><td>${fmtNum(stats.total_error_count)}</td></tr>
+          <tr><td>错误率</td><td>${stats.error_rate !== undefined ? (stats.error_rate * 100).toFixed(2) + '%' : '0%'}</td></tr>
+        </tbody>
+      </table>
+    </div>
+  `;
+
+  return html;
+}
+
+function onConvSearch(val) {
+  convSearchText = val;
+  convPage = 1;
+  renderConversations();
+}
+
+function goConvPage(page) {
+  convPage = page;
+  renderConversations();
+}
+
+// ═══════════════════════════════════════════════════════════════
+// 渲染：Conversation 详情
+// ═══════════════════════════════════════════════════════════════
+async function openConversation(idx) {
+  currentConvIdx = idx;
+  currentView = 'conversation-detail';
+
+  // 确保完整数据已加载
+  const ok = await ensureFullDataLoaded(currentFileIdx);
+  if (!ok) {
+    const app = document.getElementById('app');
+    app.innerHTML = '<div class="empty-state"><div class="icon">❌</div><h2>加载失败</h2><p>无法加载完整评测数据</p><a onclick="renderOverview()">返回概览</a></div>';
+    return;
+  }
+  renderConversationDetail();
+}
+
+function renderConversationDetail() {
+  const app = document.getElementById('app');
+  const item = allResults[currentFileIdx];
+  const results = item.data.results || (item.data.benchmark_name ? [item.data] : []);
+  const b = results[currentBenchmarkIdx];
+  const convs = b.per_conversation_results || [];
+  const c = convs[currentConvIdx];
+  const runId = item.data.eval_run_id || item.filename.replace('eval_', '').replace('.json', '');
+
+  let html = '';
+
+  // 面包屑
+  html += `
+    <div class="breadcrumb">
+      <a onclick="renderOverview()">📊 全局概览</a>
+      <span class="sep">›</span>
+      <a onclick="renderConversations()">${escHtml(b.benchmark_name)}</a>
+      <span class="sep">›</span>
+      <span class="current">${escHtml(c.conv_id)}</span>
+    </div>
+  `;
+
+  // 概览卡片
+  const convEvalMode = (b.stats || {}).eval_mode || item.data.eval_mode || 'memory';
+  const isConvFC = convEvalMode === 'full_context' || convEvalMode === 'mem0';
+  const ingestCount = (c.ingest_stats || []).length;
+  const retrieveCount = (c.retrieve_stats || []).length;
+  const consolidateCount = (c.consolidate_stats || []).length;
+  const qaCount = (c.predictions || []).length;
+  const convPassFlags = c.qa_pass_flags || [];
+  const convMcqAcc = c.mcq_accuracy !== undefined ? c.mcq_accuracy : (convPassFlags.length > 0 ? convPassFlags.filter(f => f).length / convPassFlags.length : 0);
+  const convPassedCount = convPassFlags.filter(f => f).length;
+  const convFailedCount = convPassFlags.length - convPassedCount;
+
+  // Full Context 模式的 token 统计
+  const convInputTokens = (c.input_tokens_list || []).reduce((s, v) => s + v, 0);
+  const convOutputTokens = (c.output_tokens_list || []).reduce((s, v) => s + v, 0);
+  const convAnswerCount = (c.answer_elapsed_list || []).length;
+  const convAvgElapsed = convAnswerCount > 0 ? (c.answer_elapsed_list || []).reduce((s, v) => s + v, 0) / convAnswerCount : 0;
+
+  html += `
+    <div class="stats-grid">
+      <div class="stat-card accent-blue">
+        <div class="label">QA 对数</div>
+        <div class="value">${qaCount}</div>
+      </div>
+      <div class="stat-card ${convMcqAcc >= 0.7 ? 'accent-green' : (convMcqAcc >= 0.4 ? 'accent-orange' : 'accent-red')}">
+        <div class="label">MCQ Accuracy</div>
+        <div class="value">${(convMcqAcc * 100).toFixed(1)}<span class="unit">%</span></div>
+      </div>
+      <div class="stat-card accent-green">
+        <div class="label">通过 / 未通过</div>
+        <div class="value">${convPassedCount}<span class="unit" style="color:var(--accent-red);margin-left:8px">/ ${convFailedCount}</span></div>
+      </div>
+      <div class="stat-card accent-cyan">
+        <div class="label">耗时</div>
+        <div class="value">${fmtDuration(c.elapsed_seconds)}</div>
+      </div>
+      ${isConvFC ? `
+        <div class="stat-card accent-orange">
+          <div class="label">平均 Answer 耗时</div>
+          <div class="value">${convAvgElapsed.toFixed(2)}<span class="unit">s</span></div>
+        </div>
+        <div class="stat-card accent-purple">
+          <div class="label">总 Tokens</div>
+          <div class="value">${fmtNum(Math.round((convInputTokens + convOutputTokens) / 1000))}<span class="unit">k</span></div>
+        </div>
+      ` : `
+        <div class="stat-card accent-orange">
+          <div class="label">Ingest 次数</div>
+          <div class="value">${ingestCount}</div>
+        </div>
+        <div class="stat-card accent-purple">
+          <div class="label">Retrieve 次数</div>
+          <div class="value">${retrieveCount}</div>
+        </div>
+      `}
+    </div>
+  `;
+
+  // 错误信息
+  if (c.error) {
+    html += `<div class="conv-error-banner">⚠️ 错误信息：${escHtml(c.error)}</div>`;
+  }
+
+  // QA 对比面板
+  const predictions = c.predictions || [];
+  const references = c.references || [];
+  const qaPairs = c.qa_pairs || [];
+
+  if (qaCount > 0) {
+    const failedOnlyLabel = convFailedCount > 0 ? `<span style="color:var(--accent-red);font-size:12px;margin-left:12px;cursor:pointer" onclick="toggleFailedOnly()">🔍 仅显示未通过 (<span id='failed-count'>${convFailedCount}</span>)</span>` : '';
+    html += `<div class="section-title">QA 对比 <span class="badge">${qaCount}</span>${failedOnlyLabel}</div>`;
+    html += '<div class="qa-list" id="qa-list-container">';
+    for (let i = 0; i < qaCount; i++) {
+      const qa = qaPairs[i] || {};
+      const pred = predictions[i] || '';
+      const ref = references[i] || '';
+      const question = qa.question || '';
+      const qType = qa.question_type || '';
+      const isPassed = convPassFlags[i] === true;
+      const isFailed = convPassFlags[i] === false;
+      const statusClass = isPassed ? 'passed' : (isFailed ? 'failed' : 'unknown');
+      const statusLabel = isPassed ? '✓ 通过' : (isFailed ? '✗ 未通过' : '');
+
+      html += `
+        <div class="qa-item" data-passed="${isPassed}">
+          <div class="qa-header" onclick="toggleQA(this)">
+            <div class="qa-index ${statusClass}">${i + 1}</div>
+            <div class="qa-question">${escHtml(question)}</div>
+            ${statusLabel ? `<div class="qa-status ${statusClass}">${statusLabel}</div>` : ''}
+            ${qType ? `<div class="qa-type">${escHtml(qType)}</div>` : ''}
+            <div class="qa-arrow">▼</div>
+          </div>
+          <div class="qa-body">
+            <div class="qa-section">
+              <div class="qa-section-label question-label">💬 问题</div>
+              <div class="qa-section-content">${escHtml(question)}</div>
+            </div>
+            <div class="qa-section">
+              <div class="qa-section-label reference-label">✅ 参考答案</div>
+              <div class="qa-section-content">${escHtml(ref)}</div>
+            </div>
+            <div class="qa-section">
+              <div class="qa-section-label prediction-label">🤖 模型预测</div>
+              <div class="qa-section-content">${escHtml(pred)}</div>
+            </div>
+            ${(() => {
+              const retrievedContexts = c.retrieved_contexts || [];
+              const ctx = retrievedContexts[i] || '';
+              if (!ctx) return '';
+              return `
+            <div class="qa-section">
+              <div class="qa-section-label memory-label">🧠 召回记忆</div>
+              <div class="qa-section-content memory-content">${escHtml(ctx)}</div>
+            </div>`;
+            })()}
+          </div>
+        </div>
+      `;
+    }
+    html += '</div>';
+  }
+
+  // Task Results 详情（可折叠）
+  const allTaskResults = [
+    ...(c.ingest_stats || []),
+    ...(c.retrieve_stats || []),
+    ...(c.consolidate_stats || []),
+  ];
+  if (allTaskResults.length > 0) {
+    html += `
+      <div class="task-results-section">
+        <div class="section-title">任务执行详情 <span class="badge">${allTaskResults.length}</span></div>
+    `;
+
+    const groups = [
+      { label: 'Ingest 任务', items: c.ingest_stats || [], cls: 'ingest' },
+      { label: 'Retrieve 任务', items: c.retrieve_stats || [], cls: 'retrieve' },
+      { label: 'Consolidate 任务', items: c.consolidate_stats || [], cls: 'consolidate' },
+    ];
+
+    groups.forEach(g => {
+      if (g.items.length === 0) return;
+      html += `
+        <div class="task-results-toggle" onclick="toggleTaskResults(this)">
+          <span>${g.label}（${g.items.length} 次）</span>
+          <span>▼</span>
+        </div>
+        <div class="task-results-body">
+      `;
+      g.items.forEach((item, i) => {
+        const result = item.result || {};
+        const resultLatencyS = result.total_latency_s || (result.total_latency_ms ? result.total_latency_ms / 1000 : 0);
+        const resultTokensK = result.llm_total_tokens_k || (result.llm_total_tokens ? result.llm_total_tokens / 1000 : 0);
+        html += `
+          <div class="task-result-item">
+            <div class="tr-header">
+              <span class="tr-type ${g.cls}">${(item.task_type || g.cls).toUpperCase()} #${i + 1}</span>
+              ${resultLatencyS ? `<span style="color:var(--text-muted);font-size:11px">耗时 ${fmtNum(resultLatencyS)}s</span>` : ''}
+              ${resultTokensK ? `<span style="color:var(--text-muted);font-size:11px">Tokens ${fmtNum(resultTokensK)}k</span>` : ''}
+              ${result.fs_access_count ? `<span style="color:var(--text-muted);font-size:11px">FS:${result.fs_access_count}</span>` : ''}
+              ${result.vec_access_count ? `<span style="color:var(--text-muted);font-size:11px">Vec:${result.vec_access_count}</span>` : ''}
+              ${result.graph_access_count ? `<span style="color:var(--text-muted);font-size:11px">Graph:${result.graph_access_count}</span>` : ''}
+            </div>
+            <details>
+              <summary style="cursor:pointer;color:var(--text-muted);font-size:12px;margin-bottom:6px">查看完整数据</summary>
+              <pre>${escHtml(JSON.stringify(item, null, 2))}</pre>
+            </details>
+          </div>
+        `;
+      });
+      html += '</div>';
+    });
+
+    html += '</div>';
+  }
+
+  app.innerHTML = html;
+}
+
+function toggleQA(header) {
+  const body = header.nextElementSibling;
+  const arrow = header.querySelector('.qa-arrow');
+  body.classList.toggle('open');
+  arrow.textContent = body.classList.contains('open') ? '▲' : '▼';
+}
+
+let showFailedOnly = false;
+function toggleFailedOnly() {
+  showFailedOnly = !showFailedOnly;
+  const container = document.getElementById('qa-list-container');
+  if (!container) return;
+  const items = container.querySelectorAll('.qa-item');
+  items.forEach(item => {
+    if (showFailedOnly) {
+      item.style.display = item.dataset.passed === 'true' ? 'none' : '';
+    } else {
+      item.style.display = '';
+    }
+  });
+}
+
+function toggleTaskResults(toggle) {
+  const body = toggle.nextElementSibling;
+  body.classList.toggle('open');
+  const arrow = toggle.querySelector('span:last-child');
+  arrow.textContent = body.classList.contains('open') ? '▲' : '▼';
+}
+
+// ═══════════════════════════════════════════════════════════════
+// 工具函数
+// ═══════════════════════════════════════════════════════════════
+function escHtml(str) {
+  if (str == null) return '';
+  const div = document.createElement('div');
+  div.textContent = String(str);
+  return div.innerHTML;
+}
+
+function fmtNum(n) {
+  if (n == null || n === undefined) return '0';
+  return Number(n).toLocaleString();
+}
+
+function fmtMs(ms) {
+  if (ms == null || ms === undefined) return '0';
+  const n = Number(ms);
+  if (n >= 1000000) return (n / 1000).toFixed(0).replace(/\B(?=(\d{3})+(?!\d))/g, ',') + '';
+  if (n >= 1000) return n.toFixed(0).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  return n.toFixed(1);
+}
+
+function fmtDuration(seconds) {
+  if (seconds == null) return '0s';
+  const s = Number(seconds);
+  if (s < 60) return s.toFixed(1) + 's';
+  if (s < 3600) return Math.floor(s / 60) + 'm ' + (s % 60).toFixed(0) + 's';
+  return Math.floor(s / 3600) + 'h ' + Math.floor((s % 3600) / 60) + 'm';
+}
+
+function fmtTime(isoStr) {
+  if (!isoStr) return '-';
+  try {
+    const d = new Date(isoStr);
+    const pad = n => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  } catch {
+    return isoStr;
+  }
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,8 @@
+# Slime / SGLang / vLLM 训练侧依赖。
+# 仅训练机器需要安装；llm_gateway 主服务无需此组依赖。
+#
+# 与官方 slime/sglang 文档保持一致；版本由训练侧自行锁定。
+aiohttp>=3.9
+swanlab>=0.3
+# slime / sglang / vllm / megatron 通常通过外部安装脚本拉取（见 train_*_grpo.sh
+# 中的 SLIME_TRAIN_SCRIPT / MEGATRON_ROOT），故不在本文件锁定版本。
