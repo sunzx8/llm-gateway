@@ -1485,7 +1485,7 @@ class RetrieveT2AgentLoopTask(BaseContextTask):
                     except Exception as e2:
                         logger.warning("embed_single failed for %r: %s", text[:50], e2)
         else:
-            logger.error("Embedding Model cannot visit")
+            logger.error("vec.embedder is None — vec semantic search disabled, embedding 服务无法访问")
 
         # 用预计算的 embedding 在本地做余弦相似度，避免重复 API 调用
         all_results: dict[str, dict[str, Any]] = {}  # id -> result
@@ -1604,6 +1604,9 @@ class RetrieveT2AgentLoopTask(BaseContextTask):
         query_embedding: list[float] | None = None
 
         # 1. 向量相似度检索种子节点（优先）
+        if not (semantic_texts and self.graph.embedder):
+            if semantic_texts and not self.graph.embedder:
+                logger.error("graph.embedder is None — graph vector search disabled, embedding 服务无法访问")
         if semantic_texts and self.graph.embedder:
             try:
                 # 用第一个 semantic query 作为主查询向量

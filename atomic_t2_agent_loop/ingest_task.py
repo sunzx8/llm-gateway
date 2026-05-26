@@ -794,8 +794,10 @@ class IngestT2AgentLoopTask(BaseContextTask):
                     try:
                         emb = await embedder.embed_single(embed_text)
                         self.graph.set_node_embedding(node_id, emb)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.error("node embedding failed for %s, embedding 服务无法访问: %s", node_id, e)
+                else:
+                    logger.error("graph.embedder is None — node embedding skipped for %s, embedding 服务无法访问", node_id)
                 return result
 
             if tool_name == "graph_add_edge":
@@ -826,8 +828,10 @@ class IngestT2AgentLoopTask(BaseContextTask):
                         try:
                             emb = await embedder.embed_single(edge_text)
                             self.graph.set_edge_embedding(edge_id, emb)
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.error("edge embedding failed for %s, embedding 服务无法访问: %s", edge_id, e)
+                else:
+                    logger.error("graph.embedder is None — edge embedding skipped for %s->%s, embedding 服务无法访问", source, target)
                 return result
 
             return f"Unknown tool: {tool_name}"
