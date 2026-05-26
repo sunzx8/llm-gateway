@@ -147,6 +147,27 @@ def build_task_triad(
         consolidate_task = ConsolidateContextTask(llm, fs, vec, graph)
         retrieve_task = RetrieveContextTask(llm, fs, vec, graph)
 
+    # ------------------------------------------------------------------
+    # Retrieve task 独立 override：允许训练时通过环境变量单独指定 retrieve 版本，
+    # 而 ingest/consolidate 仍然走 task_version 指定的逻辑。
+    # ------------------------------------------------------------------
+    import os as _os
+    retrieve_override = _os.environ.get("MEMORY_RL_RETRIEVE_TASK_VERSION", "")
+    if retrieve_override and retrieve_override != task_version:
+        if retrieve_override == "atomic_code_t2":
+            from atomic_code_t2.retrieve_task import RetrieveContextAtomicCodeT2Task
+            retrieve_task = RetrieveContextAtomicCodeT2Task(llm, fs, vec, graph)
+        elif retrieve_override == "t2_agent_loop":
+            from llm_gateway.atomic_t2_agent_loop.retrieve_task import RetrieveT2AgentLoopTask
+            retrieve_task = RetrieveT2AgentLoopTask(llm, fs, vec, graph)
+        elif retrieve_override == "code_t2":
+            from context_task.retrieve_context_code_task import RetrieveContextCodeTask
+            retrieve_task = RetrieveContextCodeTask(llm, fs, vec, graph)
+        elif retrieve_override == "multi_code_t2":
+            from context_task.retrieve_context_multi_code_task import RetrieveContextMultiCodeTask
+            retrieve_task = RetrieveContextMultiCodeTask(llm, fs, vec, graph)
+        logger.info("retrieve task overridden to %s (env MEMORY_RL_RETRIEVE_TASK_VERSION)", retrieve_override)
+
     if max_turns is not None:
         # IngestContextTask / RetrieveContextTask 都有 max_turns 属性，
         # 但 ConsolidateContextAtomicCodeT2Task 不一定有；用 setattr 兜底。
@@ -246,10 +267,15 @@ def _to_task_result(
     遗留：``IngestContextAtomicCodeT2Task`` 把摘要写在 ``self.result_extra`` 而非 ``_stats``，
     这里读取 fallback。
     """
+    result_extra = getattr(task, "result_extra", None)
+    merged_stats = dict(result_dict)
+    if isinstance(result_extra, dict):
+        merged_stats.update(result_extra)
+
     # 通用 error 提取
     error_str = ""
-    if not bool(result_dict.get("success", True)):
-        error_str = str(result_dict.get("error", "") or "")
+    if not bool(merged_stats.get("success", True)):
+        error_str = str(merged_stats.get("error", "") or "")
 
     # 摘要 / 输出
     finish_summary = ""
@@ -258,7 +284,6 @@ def _to_task_result(
 
     if event_type == EventType.MESSAGE:
         # 优先从 task.result_extra 读 atomic_code_t2 的摘要
-        result_extra = getattr(task, "result_extra", None)
         if isinstance(result_extra, dict):
             finish_summary = str(result_extra.get("ingest_finish_summary", "") or "")
             finish_reason = str(result_extra.get("ingest_finish_reason", "") or "")
@@ -274,13 +299,13 @@ def _to_task_result(
             finish_summary = str(result_dict.get("finish_result", "") or "")
     elif event_type == EventType.MEMORY_QUERY:
         final_output = str(
-            result_dict.get("query_memory")
-            or result_dict.get("retrieved_context")
+            merged_stats.get("query_memory")
+            or merged_stats.get("retrieved_context")
             or ""
         )
-        finish_reason = str(result_dict.get("status", "") or "")
+        finish_reason = str(merged_stats.get("status", "") or "")
     else:  # MEMORY_CONSOLIDATION
-        finish_reason = str(result_dict.get("status", "") or "")
+        finish_reason = str(merged_stats.get("status", "") or "")
 
     return TaskResult(
         task_name=task_name,
@@ -289,12 +314,12 @@ def _to_task_result(
         finish_reason=finish_reason,
         error=error_str,
         metadata={
-            "task_name": result_dict.get("task_name", task_name),
-            "total_latency_s": result_dict.get("total_latency_s"),
-            "llm_calls": result_dict.get("llm_calls"),
-            "tool_calls": result_dict.get("tool_calls"),
+            "task_name": merged_stats.get("task_name", task_name),
+            "total_latency_s": merged_stats.get("total_latency_s"),
+            "llm_calls": merged_stats.get("llm_calls"),
+            "tool_calls": merged_stats.get("tool_calls"),
         },
-        stats=result_dict,
+        stats=merged_stats,
     )
 
 

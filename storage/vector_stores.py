@@ -847,6 +847,7 @@ def _collection_suffix(collection: str) -> str:
 async def _compute_embeddings(embedder: Any, texts: list[str]) -> list[list[float]]:
     """批量计算 embedding，失败时返回空列表兜底。"""
     if not embedder:
+        logger.error("_compute_embeddings: embedder is None/empty! texts=%d items will have no embedding.", len(texts))
         return [[] for _ in texts]
     try:
         return await embedder.embed(texts)
@@ -858,6 +859,7 @@ async def _compute_embeddings(embedder: Any, texts: list[str]) -> list[list[floa
 async def _compute_single_embedding(embedder: Any, text: str) -> list[float]:
     """计算单条 embedding，失败时返回空列表。"""
     if not embedder:
+        logger.error("_compute_single_embedding: embedder is None/empty! query will have no embedding.")
         return []
     try:
         return await embedder.embed_single(text)

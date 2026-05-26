@@ -42,66 +42,6 @@ def strip_ansi(text: str) -> str:
 
 
 # ===========================================================================
-# 动态日志文件发现
-# ===========================================================================
-
-def _discover_train_log(log_dir: Path) -> Path:
-    """动态发现 train.log 文件路径。
-
-    按优先级尝试:
-    1. log_dir/train.log (训练脚本通过 tee 写入)
-    2. log_dir 下任何 *.log 文件 (排除 swanlab_monitor.log)
-    3. log_dir 上层目录下的 *.log
-    4. outputs/ 目录下的 run*.log
-    5. 返回默认路径 (等待文件创建)
-    """
-    # 优先级1: 标准路径
-    train_log = log_dir / "train.log"
-    if train_log.exists() and train_log.stat().st_size > 0:
-        return train_log
-
-    # 优先级2: log_dir 下其他 .log 文件
-    try:
-        log_files = [
-            f for f in log_dir.glob("*.log")
-            if f.name != "swanlab_monitor.log" and f.exists() and f.stat().st_size > 0
-        ]
-        if log_files:
-            log_files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-            return log_files[0]
-    except OSError:
-        pass
-
-    # 优先级3: 上层目录下的 *.log
-    parent_dir = log_dir.parent
-    try:
-        parent_logs = [
-            f for f in parent_dir.glob("*.log")
-            if f.exists() and f.stat().st_size > 0
-        ]
-        if parent_logs:
-            parent_logs.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-            return parent_logs[0]
-    except OSError:
-        pass
-
-    # 优先级4: outputs/ 目录下的 run*.log
-    grandparent = parent_dir.parent
-    try:
-        run_logs = sorted(
-            [f for f in grandparent.glob("run*.log") if f.exists() and f.stat().st_size > 0],
-            key=lambda p: p.stat().st_mtime, reverse=True
-        )
-        if run_logs:
-            return run_logs[0]
-    except OSError:
-        pass
-
-    # 没找到，返回默认路径
-    return train_log
-
-
-# ===========================================================================
 # 训练日志解析器
 # ===========================================================================
 
@@ -287,7 +227,6 @@ def monitor(
     train_log: Path,
     reward_log: Path,
     rollout_records_log: Path,
-    log_dir: Path | None = None,
     poll_interval: float = 5.0,
     gpu_poll_interval: float = 30.0,
 ):
@@ -300,10 +239,6 @@ def monitor(
     train_pos = 0
     reward_pos = 0
     rollout_records_pos = 0
-
-    # train_log 动态发现: 如果初始不存在，每轮尝试重新发现
-    _train_log_discovered = train_log.exists()
-    _last_train_log_discovery = 0.0
 
     # 全局计数器
     global_step = 0
@@ -331,16 +266,6 @@ def monitor(
 
     while True:
         now = time.time()
-
-        # === 动态重新发现 train_log (每 10 秒尝试一次) ===
-        if not _train_log_discovered and log_dir and (now - _last_train_log_discovery > 10.0):
-            _last_train_log_discovery = now
-            new_train_log = _discover_train_log(log_dir)
-            if new_train_log.exists() and new_train_log.stat().st_size > 0:
-                train_log = new_train_log
-                _train_log_discovered = True
-                train_pos = 0
-                logger.info(f"[Discovery] 发现训练日志: {train_log}")
 
         # ============================================================
         # 1. 解析训练日志 (train + eval + perf + rollout + errors)
@@ -375,11 +300,6 @@ def monitor(
                         "train/approx_kl": "train/approx_kl",
                         "train/policy_kl": "train/policy_kl",
                         "train/clip_fraction": "train/clip_fraction",
-                        # Additional policy metrics from slime
-                        "train/tis": "train/tis",
-                        "train/ois": "train/ois",
-                        "train/tis_clipfrac": "train/tis_clipfrac",
-                        "train/train_rollout_logprob_abs_diff": "train/logprob_diff",
                     }
                     for src, dst in key_mapping.items():
                         if src in train_data and isinstance(train_data[src], (int, float)):
@@ -404,18 +324,6 @@ def monitor(
 
                     if metrics:
                         swanlab.log(metrics, step=step)
-                        # Log key policy metrics for visibility
-                        pg_loss = metrics.get("train/pg_loss", None)
-                        kl_loss = metrics.get("train/kl_loss", None)
-                        entropy = metrics.get("train/entropy", None)
-                        grad_norm = metrics.get("train/grad_norm", None)
-                        logger.info(
-                            f"[Train] step={step}, pg_loss={pg_loss}, kl_loss={kl_loss}, "
-                            f"entropy={entropy}, grad_norm={grad_norm}, "
-                            f"total_loss={metrics.get('train/total_loss')}, "
-                            f"clipfrac={metrics.get('train/pg_clipfrac')}, "
-                            f"ppo_kl={metrics.get('train/ppo_kl')}"
-                        )
                     continue
 
                 # --- 验证 (eval) 指标 ---
@@ -711,11 +619,13 @@ def main():
     args = parser.parse_args()
 
     log_dir = Path(args.log_dir)
-    train_log = _discover_train_log(log_dir)
-    if train_log.exists():
-        logger.info(f"发现训练日志: {train_log}")
-    else:
-        logger.warning(f"train.log 尚未出现，将在监控循环中持续等待: {train_log}")
+    train_log = log_dir / "train.log"
+    if not train_log.exists():
+        # 尝试在 parent 中找最新的 run*.log
+        output_dir = log_dir.parent
+        run_logs = sorted(output_dir.parent.glob("run*.log"), key=lambda p: p.stat().st_mtime, reverse=True)
+        if run_logs:
+            train_log = run_logs[0]
 
     reward_log = log_dir / "reward_metrics.jsonl"
     rollout_records_log = log_dir / "rollout_records.jsonl"
@@ -758,7 +668,6 @@ def main():
             train_log,
             reward_log,
             rollout_records_log,
-            log_dir=log_dir,
             poll_interval=args.poll_interval,
             gpu_poll_interval=args.gpu_poll_interval,
         )

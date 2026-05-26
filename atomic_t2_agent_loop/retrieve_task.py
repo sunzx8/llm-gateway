@@ -166,7 +166,7 @@ AGENT_RETRIEVE_TOOLS: list[dict] = [
                 "description": "Optional semantic query for vector-based node search",
             },
             "max_hops": {"type": "integer", "description": "Max graph traversal depth (default: 2)"},
-        }, "required": ["keyword"]},
+        }},
     }},
     {"type": "function", "function": {
         "name": "fs_read_file",
@@ -745,6 +745,23 @@ class RetrieveT2AgentLoopTask(BaseContextTask):
                     return c["id"]
         return "R?"
 
+    def _normalize_fs_path(self, path: Any) -> str:
+        """Normalize paths copied from displayed trees such as `filesystem/...`."""
+        p = str(path or "").strip()
+        while p.startswith("./"):
+            p = p[2:]
+        p = p.lstrip("/")
+        if p == "filesystem":
+            return ""
+        if p.startswith("filesystem/"):
+            return p[len("filesystem/"):]
+        return p
+
+    def _normalize_fs_paths(self, paths: Any) -> Any:
+        if isinstance(paths, list):
+            return [self._normalize_fs_path(p) for p in paths]
+        return self._normalize_fs_path(paths)
+
     # ------------------------------------------------------------------
     # AGENT 模式：Tool 执行器
     # ------------------------------------------------------------------
@@ -762,7 +779,7 @@ class RetrieveT2AgentLoopTask(BaseContextTask):
             return await self._agent_tool_vec_search(args)
         elif tool_name == "graph_entity_search":
             return await self._agent_tool_graph_search(args)
-        elif tool_name == "fs_read_file":
+        elif tool_name in {"fs_read_file", "fs_read", "read_file"}:
             return self._agent_tool_fs_read(args)
         elif tool_name == "fs_execute_bash":
             return self._agent_tool_bash(args)
@@ -788,7 +805,11 @@ class RetrieveT2AgentLoopTask(BaseContextTask):
         if temporal_filter:
             queries.append({"type": "temporal", "text": temporal_filter})
         if scope:
-            queries.append({"type": "fs_scope", "text": ",".join(scope)})
+            norm_scope = self._normalize_fs_paths(scope)
+            if isinstance(norm_scope, list):
+                queries.append({"type": "fs_scope", "text": ",".join(norm_scope)})
+            elif norm_scope:
+                queries.append({"type": "fs_scope", "text": norm_scope})
 
         # 暂存并恢复 fs_top_k
         orig_top_k = self.fs_top_k
@@ -850,7 +871,7 @@ class RetrieveT2AgentLoopTask(BaseContextTask):
 
     def _agent_tool_fs_read(self, args: dict[str, Any]) -> list[dict[str, Any]]:
         """AGENT tool: fs_read_file → 读取单个文件。"""
-        path = args.get("path", "")
+        path = self._normalize_fs_path(args.get("path", ""))
         if not path:
             return []
 
@@ -1230,8 +1251,11 @@ class RetrieveT2AgentLoopTask(BaseContextTask):
     def _read_index_md(self) -> str:
         """读取 .meta/index.md 作为提示词级目录。"""
         try:
-            content = self.fs.read_file(".meta/index.md")
-            if content.startswith("ERROR"):
+            if hasattr(self.fs, "read_index"):
+                _, content = self.fs.read_index()
+            else:
+                content = self.fs.read_file(".meta/index.md")
+            if isinstance(content, str) and content.startswith("ERROR"):
                 return "(empty memory — no index available)"
             return content
         except Exception:
@@ -1337,7 +1361,7 @@ class RetrieveT2AgentLoopTask(BaseContextTask):
                 scope_text = q["text"].strip()
                 if scope_text:
                     # 支持逗号分隔的多个路径
-                    fs_scope = [s.strip() for s in scope_text.split(",") if s.strip()]
+                    fs_scope = [self._normalize_fs_path(s.strip()) for s in scope_text.split(",") if s.strip()]
                 break
 
         all_results: dict[str, tuple[float, str]] = {}  # path -> (best_score, snippet)
@@ -1460,6 +1484,8 @@ class RetrieveT2AgentLoopTask(BaseContextTask):
                         query_embeddings[text] = emb
                     except Exception as e2:
                         logger.warning("embed_single failed for %r: %s", text[:50], e2)
+        else:
+            logger.error("Embedding Model cannot visit")
 
         # 用预计算的 embedding 在本地做余弦相似度，避免重复 API 调用
         all_results: dict[str, dict[str, Any]] = {}  # id -> result

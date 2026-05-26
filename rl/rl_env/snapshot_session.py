@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit, urlunsplit
 
 from llm_gateway.rl.rl_env.env import MemoryEnv
-from llm_gateway.rl.rl_env.serialize import decode_snapshot, load_encoded
+from llm_gateway.rl.rl_env.serialize import decode_snapshot, dump_encoded, encode_snapshot, load_encoded
 from llm_gateway.rl.rl_env.snapshot import InMemorySnapshotBackend
 
 if TYPE_CHECKING:
@@ -169,6 +169,111 @@ class SnapshotSession:
             session=self,
         )
 
+    def save_env_snapshot(
+        self,
+        env: MemoryEnv,
+        *,
+        traj_id: str,
+        source_snapshot_id: str = "",
+        snapshot_id: str | None = None,
+        subdir: str = "rollout_snapshots",
+        meta: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Persist the current live ``MemoryEnv`` state as a standalone ``.cbsnap``.
+
+        This is used by agentic rollout: the policy mutates a restored env in the
+        rollout worker, then reward workers load this exact post-action state for
+        probe evaluation instead of replaying lossy tool traces.
+        """
+        env._require_reset()
+        if env.fs is None or env.vec is None or env.graph is None:
+            raise RuntimeError("MemoryEnv stores are not initialized")
+
+        snap_id = snapshot_id or uuid.uuid4().hex
+        safe_traj = (traj_id or "unknown_traj").replace(os.sep, "_")
+        root_dir = subdir if os.path.isabs(subdir) else os.path.join(self.data_root, subdir)
+        out_dir = os.path.join(root_dir, safe_traj)
+        os.makedirs(out_dir, exist_ok=True)
+        path = os.path.join(out_dir, f"{snap_id}.cbsnap")
+        encoded = encode_snapshot(
+            snap_id,
+            meta={
+                "trajectory_id": traj_id,
+                "source_snapshot_id": source_snapshot_id,
+                "task_version": self.task_version,
+                **(meta or {}),
+            },
+            fs=env.fs,
+            vec=env.vec,
+            graph=env.graph,
+            fs_mode="tar_zst",
+        )
+        tmp_path = f"{path}.tmp.{os.getpid()}.{threading.get_ident()}"
+        dump_encoded(encoded, tmp_path)
+        os.replace(tmp_path, path)
+        return {
+            "snapshot_id": snap_id,
+            "snapshot_path": path,
+            "traj_id": traj_id,
+            "source_snapshot_id": source_snapshot_id,
+        }
+
+    def load_path(
+        self,
+        snapshot_path: str,
+        *,
+        traj_id: str | None = None,
+        snapshot_id: str | None = None,
+        llm: Any = None,
+        embedder: Any = None,
+    ) -> "LoadedEnv":
+        """Load a standalone ``.cbsnap`` path into a fresh isolated ``MemoryEnv``."""
+        if not snapshot_path:
+            raise ValueError("必须提供 snapshot_path")
+        if not os.path.exists(snapshot_path):
+            raise FileNotFoundError(f".cbsnap 文件不存在: {snapshot_path}")
+        encoded = load_encoded(snapshot_path)
+        sid = snapshot_id or encoded.snapshot_id
+        tid = traj_id or "rollout_post"
+
+        if llm is None:
+            llm = _build_default_llm_from_env()
+
+        env_dir = self._get_or_create_env_dir(tid, sid)
+        env = MemoryEnv(
+            llm=llm,
+            embedder=embedder,
+            base_dir=env_dir,
+            backend=self.backend,
+            enable_git=self.enable_git,
+            snapshot_backend=InMemorySnapshotBackend(),
+            task_version=self.task_version,
+        )
+
+        def _sync_reset() -> None:
+            asyncio.run(env.reset(user_id=tid, wipe_base_dir=True))
+
+        try:
+            asyncio.get_running_loop()
+            with concurrent.futures.ThreadPoolExecutor(1) as pool:
+                pool.submit(_sync_reset).result(timeout=30)
+        except RuntimeError:
+            asyncio.run(env.reset(user_id=tid, wipe_base_dir=True))
+
+        try:
+            decode_snapshot(encoded, env.fs, env.vec, env.graph)
+        except Exception as e:
+            shutil.rmtree(env_dir, ignore_errors=True)
+            raise RuntimeError(f"从 .cbsnap 恢复失败: {e}") from e
+
+        return LoadedEnv(
+            env=env,
+            env_dir=env_dir,
+            traj_id=tid,
+            snapshot_id=sid,
+            session=self,
+        )
+
     def _get_or_create_env_dir(self, traj_id: str, snapshot_id: str) -> str:
         safe_traj = traj_id.replace(os.sep, "_")
         dir_name = f"{safe_traj}_{snapshot_id[:12]}_{uuid.uuid4().hex[:12]}"
@@ -194,6 +299,10 @@ class SnapshotSession:
             shutil.rmtree(env_dir, ignore_errors=True)
             self._active_dirs = [d for d in self._active_dirs if d != env_dir]
             logger.debug("释放独立 env_dir: %s", env_dir)
+
+        # 断开引用以加速 GC 回收内存
+        loaded.env = None  # type: ignore[assignment]
+        loaded._session = None  # type: ignore[assignment]
 
     def cleanup_all(self) -> None:
         """Best-effort cleanup for all active env workdirs."""

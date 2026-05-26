@@ -33,6 +33,8 @@ class EnvToolExecutor:
         if self.loaded is not None:
             await asyncio.to_thread(self.loaded.__exit__, None, None, None)
             self.loaded = None
+        # 释放 session 引用以允许 GC 回收整个快照链
+        self.session = None  # type: ignore[assignment]
 
     async def __call__(self, calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if self.loaded is None:

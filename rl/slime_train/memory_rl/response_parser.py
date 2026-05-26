@@ -49,6 +49,38 @@ def try_parse_json(text: str) -> dict | None:
     return None
 
 
+def parse_task_loop_payload(response: str) -> dict[str, Any] | None:
+    """Parse the native task-loop JSON wrapper without scanning nested tool XML.
+
+    Slime stores rollout output in ``sample.response`` as a string. In task-loop
+    mode that string is a JSON wrapper containing fields such as
+    ``post_consolidate_snapshot`` and ``agentic_trace``. The trace may contain
+    raw model text with ``<tool_call>`` XML, so callers that need wrapper fields
+    must parse this JSON envelope directly instead of using the generic tool-call
+    parser.
+    """
+    candidates = []
+    text = (response or "").strip()
+    if text:
+        candidates.append(text)
+    clean_text = strip_think_wrapper(response) if response else ""
+    if clean_text and clean_text != text:
+        candidates.append(clean_text)
+
+    for candidate in candidates:
+        if not candidate.startswith("{"):
+            continue
+        try:
+            data = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(data, dict):
+            continue
+        if any(key in data for key in ("agentic_trace", "task_result", "post_consolidate_snapshot", "stop_reason")):
+            return data
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Qwen3 Coder XML tool-call parser
 # ---------------------------------------------------------------------------
@@ -93,7 +125,11 @@ def set_tool_schemas(tools: list[dict[str, Any]] | None) -> None:
     if not tools:
         return
     for tool in tools:
+        if not isinstance(tool, dict):
+            continue
         func = tool.get("function") or tool
+        if not isinstance(func, dict):
+            continue
         name = func.get("name", "")
         params = func.get("parameters", {})
         if isinstance(params, dict) and "properties" in params:
@@ -242,14 +278,22 @@ def parse_tool_calls_response(response: str) -> tuple[list[dict[str, Any]], dict
     # Strip thinking content first for all formats
     clean_text = strip_think_wrapper(response) if response else ""
 
-    # 1. Try Qwen3 Coder XML format (check both raw and think-stripped text)
-    qwen_calls = _parse_qwen_tool_calls(text) or _parse_qwen_tool_calls(clean_text)
-    if qwen_calls:
-        return qwen_calls, {"tool_calls": qwen_calls, "_format": "qwen3_coder_xml"}
+    # 1. Try JSON task-loop payloads first when the whole response is JSON.
+    # The JSON may contain raw assistant content with <tool_call> blocks inside
+    # agentic_trace; parsing XML first would lose fields like post_consolidate_snapshot.
+    parsed = try_parse_json(text) if text.startswith("{") else None
+    if parsed is None:
+        parsed = try_parse_json(clean_text) if clean_text.startswith("{") else None
 
-    # 2. Try JSON formats
-    # 优先直接解析（避免 strip_think_wrapper 误截含 </think> 文本的合法 JSON）
-    parsed = try_parse_json(text)
+    # 2. Try Qwen3 Coder XML format (check both raw and think-stripped text)
+    if parsed is None:
+        qwen_calls = _parse_qwen_tool_calls(text) or _parse_qwen_tool_calls(clean_text)
+        if qwen_calls:
+            return qwen_calls, {"tool_calls": qwen_calls, "_format": "qwen3_coder_xml"}
+
+    # 3. Try loose JSON formats
+    if parsed is None:
+        parsed = try_parse_json(text)
     if parsed is None:
         parsed = try_parse_json(clean_text)
     if parsed is None:
@@ -302,16 +346,19 @@ def format_reward(response: str) -> float:
     if calls:
         score += 0.3
     valid_tools = {
-        # Ingest tools (read + write)
-        "fs_grep", "fs_bm25_search", "fs_read_file", "fs_read_lines", "fs_tree",
-        "vec_search", "vec_search_all", "graph_search_nodes", "fs_execute_bash",
-        "fs_write", "fs_append", "fs_update_line", "fs_update_meta",
-        "vec_add", "graph_add_node", "graph_add_edge",
+        # File system tools
+        "fs_read", "read_file", "fs_read_file", "fs_read_lines", "fs_tree",
+        "fs_search", "fs_grep", "fs_bm25_search", "fs_execute_bash",
+        "fs_write", "fs_append", "fs_update_line", "fs_update_meta", "fs_delete",
+        # Vector tools
+        "vec_search", "vec_search_all", "vec_semantic_search", "vec_list_collections",
+        "vec_add", "vec_delete", "vec_write",
+        # Graph tools
+        "graph_search_nodes", "graph_entity_search", "graph_get_neighbors",
+        "graph_get_subgraph", "graph_stats", "graph_add_node", "graph_add_edge",
+        "graph_delete_node", "graph_delete_edge", "graph_write",
         # Retrieve tools
-        "vec_semantic_search", "graph_entity_search", "submit",
-        # Consolidate tools (superset of ingest write)
-        "fs_delete", "vec_delete", "graph_delete_node", "graph_delete_edge",
-        "vec_write", "graph_write",
+        "submit",
         # Shared
         "finish",
     }

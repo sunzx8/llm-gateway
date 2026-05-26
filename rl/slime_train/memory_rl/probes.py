@@ -3,12 +3,15 @@ from __future__ import annotations
 import asyncio
 import os
 import re
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 try:
     from llm_gateway.rl.slime_train.tasks.retrieve_reward.retrieval_hit import score_context_against_gold_async
 except ImportError:  # pragma: no cover - legacy retrieve-only PYTHONPATH
     from tasks.retrieve_reward.retrieval_hit import score_context_against_gold_async
+
+
+EnvFactory = Callable[[], Awaitable[Any]]
 
 
 def select_task_probes(
@@ -91,20 +94,32 @@ def build_probe_queries(probe: dict[str, Any]) -> list[dict[str, str]]:
     return queries[:8]
 
 
-async def evaluate_probe_set(env, probes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+async def evaluate_probe_set(
+    env,
+    probes: list[dict[str, Any]],
+    *,
+    env_factory: EnvFactory | None = None,
+) -> list[dict[str, Any]]:
     """Retrieve with the bound query task, then QA-score every probe.
 
-    This intentionally runs ``env.step_query`` instead of feeding deterministic
-    rewritten queries into lower-level retrieval: ingest/consolidate rewards must
-    evaluate the actual query task implementation selected by ``task_version``
-    (atomic rewrite+return, t2_agent_loop agentic retrieve, etc.).
+    When ``env_factory`` is provided, every probe gets a freshly loaded env and
+    can run concurrently without sharing stateful retrieve task/result objects.
     """
     if not probes:
         return []
 
     async def _score_one(index: int, probe: dict[str, Any]) -> dict[str, Any]:
         question = str(probe.get("probe_query", "")).strip()
-        context = await _retrieve_probe_context(env, question)
+        loaded = None
+        probe_env = env
+        if env_factory is not None:
+            loaded = await env_factory()
+            probe_env = loaded.env if hasattr(loaded, "env") else loaded
+        try:
+            context = await _retrieve_probe_context(probe_env, question)
+        finally:
+            if loaded is not None and hasattr(loaded, "__exit__"):
+                await asyncio.to_thread(loaded.__exit__, None, None, None)
         if not context.strip():
             context = "(No relevant memories found)"
         score = await score_context_against_gold_async(context, normalize_ground_truth(probe))
@@ -119,10 +134,7 @@ async def evaluate_probe_set(env, probes: list[dict[str, Any]]) -> list[dict[str
 
     results = await _gather_limited(
         [_score_one(i, probe) for i, probe in enumerate(probes)],
-        # Query tasks are stateful (shared task/result stats inside one env), so
-        # default to sequential probe retrieval. Override only after confirming
-        # the selected task_version is concurrency-safe.
-        limit=int(os.environ.get("PROBE_TASK_MAX_CONCURRENCY", "8")),
+        limit=max(1, int(os.environ.get("PROBE_TASK_MAX_CONCURRENCY", "4"))),
     )
     return [r for r in results if isinstance(r, dict)]
 
@@ -178,9 +190,52 @@ def positive_probe_score_delta(before: list[dict[str, Any]], after: list[dict[st
     return min(1.0, total / len(after))
 
 
+def signed_probe_score_delta(before: list[dict[str, Any]], after: list[dict[str, Any]]) -> float:
+    """Net average per-probe score change, clipped to [-1, 1].
+
+    Unlike :func:`positive_probe_score_delta` this does **not** drop negative
+    deltas, so a policy that fixes one probe by breaking another no longer gets
+    free reward. Use this as the primary probe-quality signal in consolidate
+    reward to actually penalize regressions.
+    """
+    if not after:
+        return 0.0
+    total = 0.0
+    for i, after_eval in enumerate(after):
+        before_score = float(before[i].get("score", 0.0)) if i < len(before) else 0.0
+        total += float(after_eval.get("score", 0.0)) - before_score
+    return max(-1.0, min(1.0, total / len(after)))
+
+
 def positive_probe_accuracy_delta(before: list[dict[str, Any]], after: list[dict[str, Any]]) -> float:
     """Positive delta in probe correctness rate after evolution."""
     return max(0.0, probe_accuracy(after) - probe_accuracy(before))
+
+
+def signed_probe_accuracy_delta(before: list[dict[str, Any]], after: list[dict[str, Any]]) -> float:
+    """Signed delta in probe correctness rate after evolution, in [-1, 1]."""
+    return max(-1.0, min(1.0, probe_accuracy(after) - probe_accuracy(before)))
+
+
+def headroom_after_score(before: list[dict[str, Any]], after: list[dict[str, Any]]) -> float:
+    """Score improvement normalized by remaining headroom: (after-before)/(1-before+eps).
+
+    Designed to replace the absolute ``r_after_score`` term: probes that were
+    already correct (before≈1) contribute ~0 regardless of after; probes that
+    were wrong (before≈0) and got fixed contribute ~1. Output clipped to
+    [-1, 1] (sign preserved on regressions, but small).
+    """
+    if not after:
+        return 0.0
+    eps = 1e-3
+    contribs: list[float] = []
+    for i, after_eval in enumerate(after):
+        before_score = float(before[i].get("score", 0.0)) if i < len(before) else 0.0
+        after_score = float(after_eval.get("score", 0.0))
+        head = max(eps, 1.0 - before_score)
+        contribs.append((after_score - before_score) / head)
+    avg = sum(contribs) / len(contribs)
+    return max(-1.0, min(1.0, avg))
 
 
 def context_diff_score(

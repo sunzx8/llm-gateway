@@ -200,7 +200,7 @@ class MemoryEnv:
         )
 
     def close(self) -> None:
-        """释放快照资源 + 清理自有的 temp base_dir。"""
+        """释放快照资源 + 清理自有的 temp base_dir + 释放内存中的 store 对象。"""
         for snap in self._managed_snapshots:
             try:
                 self.snapshot_backend.release(snap)
@@ -210,6 +210,18 @@ class MemoryEnv:
 
         if self._owns_base_dir and os.path.isdir(self.base_dir):
             shutil.rmtree(self.base_dir, ignore_errors=True)
+
+        # 主动释放 store 对象以回收内存（BM25 索引、向量、图等）
+        if self.fs is not None:
+            if hasattr(self.fs, '_bm25_index'):
+                self.fs._bm25_index = None
+                self.fs._bm25_index_initialized = False
+            self.fs = None
+        if self.vec is not None:
+            self.vec = None
+        if self.graph is not None:
+            self.graph = None
+        self.triad = None
 
     # ------------------------------------------------------------------
     # Snapshot / restore
@@ -647,12 +659,14 @@ async def _execute_memory_tool_call(*, fs: Any, vec: Any, graph: Any, call: Tool
     args = call.arguments
 
     if name == "finish":
-        return str(args.get("summary", args.get("changes_summary", "finished")))
+        return str(args.get("result") or args.get("summary") or args.get("changes_summary") or "finished")
 
     if name in {
-        "fs_grep", "fs_bm25_search", "fs_read_file", "fs_read_lines", "fs_tree",
-        "vec_search", "vec_search_all", "graph_search_nodes", "graph_entity_search",
-        "vec_semantic_search", "fs_execute_bash",
+        "fs_read", "read_file", "fs_read_file", "fs_read_lines", "fs_tree",
+        "fs_search", "fs_grep", "fs_bm25_search", "fs_execute_bash",
+        "vec_search", "vec_search_all", "vec_semantic_search", "vec_list_collections",
+        "graph_search_nodes", "graph_entity_search", "graph_get_neighbors",
+        "graph_get_subgraph", "graph_stats",
     }:
         return f"SKIPPED: read/search tool {name} is not replayed during reward apply"
 
@@ -761,6 +775,14 @@ async def _execute_memory_tool_call(*, fs: Any, vec: Any, graph: Any, call: Tool
 def _safe_rel_path(base_path: str, path: str) -> str:
     if not path:
         raise ValueError("path is required")
+    path = str(path).strip()
+    while path.startswith("./"):
+        path = path[2:]
+    path = path.lstrip("/")
+    if path == "filesystem":
+        path = ""
+    elif path.startswith("filesystem/"):
+        path = path[len("filesystem/"):]
     base = os.path.realpath(base_path)
     if os.path.isabs(path):
         full = os.path.realpath(path)

@@ -15,8 +15,9 @@
 #   bash launch_cluster_train.sh --task-version t2_agent_loop
 #   bash launch_cluster_train.sh --skip-docker   # 跳过 docker 启动（容器已在运行）
 #   bash launch_cluster_train.sh --skip-ray      # 跳过 Ray 集群启动（已有集群）
+#   bash launch_cluster_train.sh --force-reload  # 强制重新 docker load 镜像（即使已存在）
 #   bash launch_cluster_train.sh --dry-run       # 仅打印命令不执行
-#   bash /data/cloud_disk_1/erenpeng/llm-gateway/rl/slime_train/ingest/scripts/launch_cluster_train.sh --task-version t2_agent_loop --skip-docker --skip-ray 
+#   bash /data/cloud_disk_1/erenpeng/llm-gateway/rl/slime_train/ingest/scripts/launch_cluster_train.sh --task-version t2_agent_loop --skip-docker
 # 集群规模:
 #   - 16 节点 × 8 GPU = 128 GPU
 #   - 训练: actor-num-nodes 可按需调整
@@ -65,11 +66,11 @@ export MEMORY_RL_TRAIN_TASK_LOOP=1
 # Docker 配置
 # =============================================================================
 # 使用 rl_snapshot tag 以区分原始 slimerl/slime:latest 镜像（不会删除原镜像）
-DOCKER_IMAGE="slimerl/slime:rl_snapshot"
+DOCKER_IMAGE="slimerl/slime:latest"
 DOCKER_TAR="/data/cloud_disk_1/slime_rl_snapshot.tar"
 CONTAINER_NAME="slime_rl_ingest"
-# 强制重新 load 镜像（每次不跳过 docker 时都会重新加载 tar）
-FORCE_RELOAD_IMAGE=true
+# 是否强制重新 load 镜像（设为 false 时，已有镜像的节点直接 docker run，不再重复加载 tar）
+FORCE_RELOAD_IMAGE=${FORCE_RELOAD_IMAGE:-false}
 RAY_PORT=6379
 RAY_DASHBOARD_PORT=8265
 RAY_HEAD_ADDRESS="${HEAD_NODE}:${RAY_PORT}"
@@ -88,24 +89,35 @@ LLM_GATEWAY_ROOT="${LLM_GATEWAY_ROOT:-$(cd "${SLIME_TRAIN_ROOT}/../.." && pwd)}"
 LLM_GATEWAY_PARENT="${LLM_GATEWAY_PARENT:-$(cd "${LLM_GATEWAY_ROOT}/.." && pwd)}"
 
 # 模型路径
-HF_CHECKPOINT="${HF_CHECKPOINT:-/data/cloud_disk_1/erenpeng/models/Qwen/Qwen3.6-27B}"
-TORCH_DIST_CHECKPOINT="${TORCH_DIST_CHECKPOINT:-/data/cloud_disk_4/megatron_rl_checkpoints/qwen36-27b-combo_v4_claude_sft_ckpt450/iter_0000450}"
+HF_CHECKPOINT="${HF_CHECKPOINT:-/data/cloud_disk_4/dl_models/unsloth/Qwen3.6-27B}"
+TORCH_DIST_CHECKPOINT="${TORCH_DIST_CHECKPOINT:-/data/cloud_disk_4/megatron_rl_checkpoints/qwen36-27b-base_torch_dist/iter_0000001}"
 # FROZEN_MODEL_PATH="${FROZEN_MODEL_PATH:-/data/cloud_disk_1/changyuchen/memory_ai_RL/model/iter_0000189_hf}"
 FROZEN_MODEL_PORT="${FROZEN_MODEL_PORT:-30000}"
+# 冻结模型负载均衡配置 (逗号分隔的多端点)
+# 格式: url|model_name,url|model_name,...
+FROZEN_MODEL_ENDPOINTS="${FROZEN_MODEL_ENDPOINTS:-http://124.221.221.186:30000/v1/chat/completions|glm-5.1,http://123.207.200.23:30000/v1/chat/completions|DeepSeek-V4-Pro,http://220.154.132.76:30000/v1/chat/completions|Kimi-K2.6}"
+# 兼容旧的单 URL 配置（如设置了 FROZEN_MODEL_URL 则优先使用新的多端点配置）
 FROZEN_MODEL_URL="${FROZEN_MODEL_URL:-http://124.221.221.186:30000/v1/chat/completions}"
 FROZEN_MODEL_NAME="${FROZEN_MODEL_NAME:-glm-5.1}"
-FROZEN_MODEL_TIMEOUT="${FROZEN_MODEL_TIMEOUT:-60}"
+FROZEN_MODEL_TIMEOUT="${FROZEN_MODEL_TIMEOUT:-1200}"
 FROZEN_MODEL_MAX_CONCURRENCY="${FROZEN_MODEL_MAX_CONCURRENCY:-32}"
 FROZEN_MODEL_CONN_LIMIT="${FROZEN_MODEL_CONN_LIMIT:-128}"
 FROZEN_MODEL_MAX_TOKENS="${FROZEN_MODEL_MAX_TOKENS:-128000}"
 FROZEN_MODEL_MAX_INPUT_TOKENS="${FROZEN_MODEL_MAX_INPUT_TOKENS:-16384}"
 PROBE_EVAL_MAX_CONCURRENCY="${PROBE_EVAL_MAX_CONCURRENCY:-8}"
+# reward 评估每个 probe 会加载独立 env，可安全并发跑 retrieve agent loop。
+PROBE_TASK_MAX_CONCURRENCY="${PROBE_TASK_MAX_CONCURRENCY:-4}"
+
+# Rollout policy fallback：当所有 frozen 端点失败时，frozen_qa_client 会
+# 降级使用外部 vLLM 端点（和拒绝采样用的同一批机器）。
+ROLLOUT_FALLBACK_URL="${ROLLOUT_FALLBACK_URL:-http://192.168.16.103:7777/v1/chat/completions}"
+ROLLOUT_FALLBACK_MODEL="${ROLLOUT_FALLBACK_MODEL:-/data/cloud_disk_1/models/Qwen/Qwen3.6-27B}"
 
 # 数据路径
 # INPUT_RL_DATA="${INPUT_RL_DATA:-/data/cloud_disk_1/erenpeng/datasets/merged_stage1_e2e/train/rl_data.jsonl}"
 SNAPSHOT_DATA_ROOT="${SNAPSHOT_DATA_ROOT:-/data/cloud_disk_1/erenpeng/datasets/merged_stage1_e2e}"
 
-TRAIN_VAL_DATA="${TRAIN_VAL_DATA:-/data/cloud_disk_1/erenpeng/datasets/merged_stage1_e2e/slime_output/ingest_merged_stage1_e2e_train.clean.jsonl}"
+TRAIN_VAL_DATA="${TRAIN_VAL_DATA:-/data/cloud_disk_1/erenpeng/datasets/merged_stage1_e2e/slime_output/rejection_filtered/ingest_full.jsonl}"
 TRAIN_VAL_SPLIT="${TRAIN_VAL_SPLIT:-0.9}"  # 训练集占比，验证集为 1 - TRAIN_VAL_SPLIT
 
 TRAIN_DATA="${TRAIN_DATA:-}"
@@ -113,18 +125,23 @@ EVAL_DATA="${EVAL_DATA:-}"
 
 # RL 训练参数
 MEMORY_RL_MAX_AGENT_TURNS="${MEMORY_RL_MAX_AGENT_TURNS:-20}"
-MEMORY_RL_TASK_VERSION="${MEMORY_RL_TASK_VERSION:-atomic_code_t2}"
+MEMORY_RL_TASK_VERSION="${MEMORY_RL_TASK_VERSION:-t2_agent_loop}"
+MEMORY_RL_RETRIEVE_TASK_VERSION="${MEMORY_RL_RETRIEVE_TASK_VERSION:-atomic_code_t2}"
 MEMORY_RL_APPLY_MODE="${MEMORY_RL_APPLY_MODE:-tool_calls}"
+MEMORY_RL_LLM_MAX_TOKENS="${MEMORY_RL_LLM_MAX_TOKENS:-64000}"
+MEMORY_RL_LLM_TIMEOUT="${MEMORY_RL_LLM_TIMEOUT:-1200}"
+MEMORY_RL_GENERATE_TIMEOUT="${MEMORY_RL_GENERATE_TIMEOUT:-600}"
 
 # 集群训练规模 (可按 GPU 总量调整)
 ACTOR_NUM_NODES="${ACTOR_NUM_NODES:-8}"
 ACTOR_NUM_GPUS_PER_NODE="${ACTOR_NUM_GPUS_PER_NODE:-8}"
-ROLLOUT_NUM_GPUS="${ROLLOUT_NUM_GPUS:-48}"
+ROLLOUT_NUM_GPUS="${ROLLOUT_NUM_GPUS:-64}"
 ROLLOUT_NUM_GPUS_PER_ENGINE="${ROLLOUT_NUM_GPUS_PER_ENGINE:-2}"
-NUM_ROLLOUT="${NUM_ROLLOUT:-100}"
-ROLLOUT_BATCH_SIZE="${ROLLOUT_BATCH_SIZE:-32}"
-N_SAMPLES_PER_PROMPT="${N_SAMPLES_PER_PROMPT:-4}"
-GLOBAL_BATCH_SIZE="${GLOBAL_BATCH_SIZE:-64}"
+NUM_ROLLOUT="${NUM_ROLLOUT:-1000}"
+ROLLOUT_BATCH_SIZE="${ROLLOUT_BATCH_SIZE:-4}"
+N_SAMPLES_PER_PROMPT="${N_SAMPLES_PER_PROMPT:-8}"
+GLOBAL_BATCH_SIZE="${GLOBAL_BATCH_SIZE:-32}"
+SGLANG_MEM_FRACTION_STATIC="${SGLANG_MEM_FRACTION_STATIC:-0.85}"
 
 MEGATRON_ROOT="${MEGATRON_ROOT:-/root/Megatron-LM}"
 SLIME_ROOT="${SLIME_ROOT:-/root/slime}"
@@ -162,6 +179,7 @@ while [[ $# -gt 0 ]]; do
         --skip-ray)       SKIP_RAY=true; shift ;;
         --skip-deps)      SKIP_DEPS=true; shift ;;
         --dry-run)        DRY_RUN=true; shift ;;
+        --force-reload)   FORCE_RELOAD_IMAGE=true; shift ;;
         --task-version)   MEMORY_RL_TASK_VERSION="$2"; shift 2 ;;
         --actor-num-nodes) ACTOR_NUM_NODES="$2"; shift 2 ;;
         --rollout-num-gpus) ROLLOUT_NUM_GPUS="$2"; shift 2 ;;
@@ -348,17 +366,46 @@ clear_gpu_processes() {
 }
 
 # =============================================================================
+# Step 0.6: 释放 head 节点上 SGLang router 端口 (避免端口被旧进程占用)
+# =============================================================================
+clear_router_port() {
+    log_step "===== Step 0.6: 释放 head 节点 SGLang router 端口 (${SGLANG_ROUTER_PORT}) ====="
+
+    if [ "${DRY_RUN}" = true ]; then
+        log_info "[DRY-RUN] ssh ${HEAD_NODE}: 检查并释放端口 ${SGLANG_ROUTER_PORT}"
+        return
+    fi
+
+    # 优先用 ss / lsof 列出端口占用进程，全部 kill -9
+    # 注意：这里在 host 侧执行，因为 docker 通常会把容器端口映射到 host
+    local kill_cmd
+    kill_cmd="(ss -tlnp 2>/dev/null | awk -v port=:${SGLANG_ROUTER_PORT}\$ '\$4 ~ port {print \$0}' | grep -oP 'pid=\\K[0-9]+' | sort -u | xargs -r kill -9 2>/dev/null; \
+              lsof -ti :${SGLANG_ROUTER_PORT} 2>/dev/null | sort -u | xargs -r kill -9 2>/dev/null; \
+              fuser -k ${SGLANG_ROUTER_PORT}/tcp 2>/dev/null; true)"
+
+    ssh ${SSH_OPTS} root@"${HEAD_NODE}" "${kill_cmd}" 2>/dev/null || true
+
+    # 等待端口完全释放
+    sleep 2
+    if ssh ${SSH_OPTS} root@"${HEAD_NODE}" "ss -tlnp 2>/dev/null | grep -q ':${SGLANG_ROUTER_PORT} '" 2>/dev/null; then
+        log_warn "节点 ${HEAD_NODE}: 端口 ${SGLANG_ROUTER_PORT} 仍被占用，可能需要手动处理"
+    else
+        log_info "节点 ${HEAD_NODE}: 端口 ${SGLANG_ROUTER_PORT} 已释放 ✓"
+    fi
+}
+
+# =============================================================================
 # Step 1: Docker 镜像加载 & 容器启动
 # =============================================================================
 setup_docker() {
     log_step "===== Step 1: Docker 镜像 & 容器配置 ====="
 
-    # 如果 FORCE_RELOAD_IMAGE=true，则跳过检查，所有节点都强制重新加载
-    if [ "${FORCE_RELOAD_IMAGE}" = true ]; then
+    # 并行检查各节点镜像是否已存在
+    local nodes_need_load=()
+    if [ "${FORCE_RELOAD_IMAGE}" = "true" ]; then
         log_info "FORCE_RELOAD_IMAGE=true, 所有节点将强制重新加载镜像"
-        local nodes_need_load=("${ALL_NODES[@]}")
+        nodes_need_load=("${ALL_NODES[@]}")
     else
-        # 并行检查哪些节点需要加载镜像
         log_info "检查各节点镜像状态 (${#ALL_NODES[@]} 节点并行)..."
         local _img_pids=()
         local _img_results_dir=$(mktemp -d)
@@ -385,7 +432,6 @@ setup_docker() {
         done
         echo ""
 
-        local nodes_need_load=()
         local _img_ok_count=0
         for node in "${ALL_NODES[@]}"; do
             local result
@@ -400,7 +446,7 @@ setup_docker() {
         rm -rf "${_img_results_dir}"
 
         if [ ${_img_ok_count} -gt 0 ]; then
-            log_info "${_img_ok_count} 个节点镜像已存在 ✓"
+            log_info "${_img_ok_count} 个节点镜像已存在，将直接 docker run ✓"
         fi
     fi
 
@@ -452,7 +498,7 @@ setup_docker() {
         done
         log_info "所有节点镜像加载完成 ✓"
     else
-        log_info "所有节点镜像已就绪，无需加载"
+        log_info "所有节点镜像已存在，跳过 docker load，直接启动容器 ✓"
     fi
 
     # 启动容器（并行，强制销毁同名容器后重建）
@@ -462,17 +508,46 @@ setup_docker() {
     local _start_nodes=()
 
     for node in "${ALL_NODES[@]}"; do
-        # 后台并行: 强制删除旧容器 + 启动新容器
+        # 后台并行: 强制删除旧容器 + 等待名字真正释放 + 启动新容器
+        # 注意: 对处于 dead / marked-for-removal 状态的容器,
+        # `docker rm -f` 可能立即返回但底层清理是异步的,
+        # 紧接着的 `docker run --name` 会因名字仍被占用而失败。
+        # 这里通过轮询 `docker ps -a` 等待名字真正释放,最长等待 30s。
         (
-            run_remote "${node}" "docker rm -f ${CONTAINER_NAME} 2>/dev/null || true"
+            run_remote "${node}" "
+                set -e
+                # 1) 强制删除同名容器（忽略不存在错误）
+                docker rm -f ${CONTAINER_NAME} >/dev/null 2>&1 || true
+
+                # 2) 等待容器名彻底从 docker 中消失（最长 30s）
+                for i in \$(seq 1 30); do
+                    if ! docker ps -a --format '{{.Names}}' | grep -qx '${CONTAINER_NAME}'; then
+                        break
+                    fi
+                    # 再尝试删一次,避免 dead 状态卡住
+                    docker rm -f ${CONTAINER_NAME} >/dev/null 2>&1 || true
+                    sleep 1
+                done
+
+                # 3) 最终校验:如果还存在,直接报错退出,避免下一步 docker run 冲突
+                if docker ps -a --format '{{.Names}}' | grep -qx '${CONTAINER_NAME}'; then
+                    echo \"[FATAL] container ${CONTAINER_NAME} still exists after 30s cleanup\" >&2
+                    docker ps -a --filter name=^/${CONTAINER_NAME}\$ >&2 || true
+                    exit 1
+                fi
+            "
             run_remote "${node}" "docker run -d \
                 --name ${CONTAINER_NAME} \
                 --network host \
                 --ipc host \
                 --gpus all \
                 --privileged \
+                --memory 0 \
+                --memory-swap -1 \
+                --shm-size 96g \
                 --ulimit memlock=-1 \
                 --ulimit stack=67108864 \
+                --ulimit nofile=1048576:1048576 \
                 -v ${MOUNT_HOST_DATA}:${MOUNT_CONTAINER_DATA} \
                 -v /root/.ssh:/root/.ssh:ro \
                 -e NVIDIA_VISIBLE_DEVICES=all \
@@ -666,17 +741,31 @@ setup_ray_cluster() {
 start_frozen_model_service() {
     log_step "===== Step 3: 检查冻结模型 API ====="
 
-    log_info "使用外部冻结模型 API (不在集群本地加载)"
-    log_info "  URL: ${FROZEN_MODEL_URL}"
-    log_info "  模型名称: ${FROZEN_MODEL_NAME}"
+    log_info "使用外部冻结模型 API (负载均衡多端点)"
+    log_info "  FROZEN_MODEL_ENDPOINTS: ${FROZEN_MODEL_ENDPOINTS}"
+    log_info "  默认 URL (fallback): ${FROZEN_MODEL_URL}"
+    log_info "  默认模型名称: ${FROZEN_MODEL_NAME}"
 
-    # 检查外部 endpoint 是否可用 (尝试 /health 和 /v1/models 两种健康检查)
-    local base_url="${FROZEN_MODEL_URL%/v1/chat/completions}"
-    if curl -s --connect-timeout 5 "${base_url}/health" > /dev/null 2>&1 || \
-       curl -s --connect-timeout 5 "${base_url}/v1/models" > /dev/null 2>&1; then
-        log_info "外部冻结模型 API 可用 ✓"
-    else
-        log_warn "外部冻结模型 API 暂时无法连通 (${base_url})，训练时将直接使用配置的 URL"
+    # 逐一检查所有端点的健康状态
+    local available_count=0
+    local total_count=0
+    IFS=',' read -ra ENDPOINT_ARRAY <<< "${FROZEN_MODEL_ENDPOINTS}"
+    for endpoint_entry in "${ENDPOINT_ARRAY[@]}"; do
+        local ep_url="${endpoint_entry%%|*}"
+        local ep_model="${endpoint_entry##*|}"
+        local base_url="${ep_url%/v1/chat/completions}"
+        total_count=$((total_count + 1))
+        if curl -s --connect-timeout 5 "${base_url}/health" > /dev/null 2>&1 || \
+           curl -s --connect-timeout 5 "${base_url}/v1/models" > /dev/null 2>&1; then
+            log_info "  ✓ 端点可用: ${ep_url} (model=${ep_model})"
+            available_count=$((available_count + 1))
+        else
+            log_warn "  ✗ 端点不可达: ${ep_url} (model=${ep_model})"
+        fi
+    done
+    log_info "冻结模型端点健康检查: ${available_count}/${total_count} 可用"
+    if [ ${available_count} -eq 0 ]; then
+        log_warn "所有冻结模型端点暂时无法连通，训练时将按配置重试"
         log_warn "如果训练时 API 仍不可达，reward 计算将会失败"
     fi
     return 0
@@ -795,6 +884,7 @@ submit_training_job() {
     log_info "  NUM_ROLLOUT:           ${NUM_ROLLOUT}"
     log_info "  GLOBAL_BATCH_SIZE:     ${GLOBAL_BATCH_SIZE}"
     log_info "  FROZEN_MODEL_URL:      ${FROZEN_MODEL_URL}"
+    log_info "  FROZEN_MODEL_ENDPOINTS: ${FROZEN_MODEL_ENDPOINTS}"
 
     # 提交 Ray Job
     log_step "提交 Ray Job..."
@@ -814,7 +904,7 @@ submit_training_job() {
 
     # 将 runtime env JSON 写入容器内文件 (避免命令行引号问题)
     ssh ${SSH_OPTS} root@"${HEAD_NODE}" "docker exec -i ${CONTAINER_NAME} tee ${RUNTIME_ENV_JSON_FILE} > /dev/null" <<JSON_EOF
-{"env_vars":{"PYTHONPATH":"${MEGATRON_ROOT}:${LLM_GATEWAY_PARENT}:${LLM_GATEWAY_ROOT}","PYTHONUNBUFFERED":"1","CUDA_DEVICE_MAX_CONNECTIONS":"1","PYTORCH_CUDA_ALLOC_CONF":"expandable_segments:True","NCCL_NVLS_ENABLE":"1","NCCL_IB_DISABLE":"0","NCCL_IB_GID_INDEX":"3","NCCL_IB_HCA":"mlx5","NCCL_NET_GDR_LEVEL":"5","NCCL_TIMEOUT_MS":"600000","NCCL_SOCKET_IFNAME":"eth0","GLOO_SOCKET_IFNAME":"eth0","NCCL_DEBUG":"WARN","TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC":"600","MASTER_ADDR":"${HEAD_NODE}","no_proxy":"127.0.0.1,${HEAD_NODE}","INGEST_SNAPSHOT_DATA_ROOT":"${SNAPSHOT_DATA_ROOT}","SNAPSHOT_DATA_ROOT":"${SNAPSHOT_DATA_ROOT}","FROZEN_MODEL_URL":"${FROZEN_MODEL_URL}","FROZEN_MODEL_NAME":"${FROZEN_MODEL_NAME}","FROZEN_MODEL_TIMEOUT":"${FROZEN_MODEL_TIMEOUT}","FROZEN_MODEL_MAX_CONCURRENCY":"${FROZEN_MODEL_MAX_CONCURRENCY}","FROZEN_MODEL_CONN_LIMIT":"${FROZEN_MODEL_CONN_LIMIT}","FROZEN_MODEL_MAX_TOKENS":"${FROZEN_MODEL_MAX_TOKENS}","FROZEN_MODEL_MAX_INPUT_TOKENS":"${FROZEN_MODEL_MAX_INPUT_TOKENS}","PROBE_EVAL_MAX_CONCURRENCY":"${PROBE_EVAL_MAX_CONCURRENCY}","REWARD_METRICS_LOG":"${LOG_DIR}/reward_metrics.jsonl","MEMORY_RL_MAX_AGENT_TURNS":"${MEMORY_RL_MAX_AGENT_TURNS}","MEMORY_RL_TASK_VERSION":"${MEMORY_RL_TASK_VERSION}","MEMORY_RL_APPLY_MODE":"${MEMORY_RL_APPLY_MODE}","MEMORY_RL_LLM_API_URL":"${FROZEN_MODEL_URL}","MEMORY_RL_LLM_MODEL":"${FROZEN_MODEL_NAME}"}}
+{"env_vars":{"PYTHONPATH":"${MEGATRON_ROOT}:${LLM_GATEWAY_PARENT}:${LLM_GATEWAY_ROOT}","PYTHONUNBUFFERED":"1","CUDA_DEVICE_MAX_CONNECTIONS":"1","PYTORCH_ALLOC_CONF":"expandable_segments:True","PYTORCH_CUDA_ALLOC_CONF":"expandable_segments:True","NCCL_NVLS_ENABLE":"0","NCCL_IB_DISABLE":"0","NCCL_IB_GID_INDEX":"3","NCCL_IB_HCA":"mlx5","NCCL_NET_GDR_LEVEL":"5","NCCL_TIMEOUT_MS":"7200000","NCCL_SOCKET_IFNAME":"eth0","GLOO_SOCKET_IFNAME":"eth0","NCCL_DEBUG":"WARN","TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC":"7200","TORCH_NCCL_DUMP_ON_TIMEOUT":"1","TORCH_NCCL_TRACE_BUFFER_SIZE":"20000","TORCH_NCCL_DESYNC_DEBUG":"1","MASTER_ADDR":"${HEAD_NODE}","no_proxy":"127.0.0.1,${HEAD_NODE}","INGEST_SNAPSHOT_DATA_ROOT":"${SNAPSHOT_DATA_ROOT}","SNAPSHOT_DATA_ROOT":"${SNAPSHOT_DATA_ROOT}","FROZEN_MODEL_URL":"${FROZEN_MODEL_URL}","FROZEN_MODEL_ENDPOINTS":"${FROZEN_MODEL_ENDPOINTS}","FROZEN_MODEL_NAME":"${FROZEN_MODEL_NAME}","FROZEN_MODEL_TIMEOUT":"${FROZEN_MODEL_TIMEOUT}","FROZEN_MODEL_MAX_CONCURRENCY":"${FROZEN_MODEL_MAX_CONCURRENCY}","FROZEN_MODEL_CONN_LIMIT":"${FROZEN_MODEL_CONN_LIMIT}","FROZEN_MODEL_MAX_TOKENS":"${FROZEN_MODEL_MAX_TOKENS}","FROZEN_MODEL_MAX_INPUT_TOKENS":"${FROZEN_MODEL_MAX_INPUT_TOKENS}","PROBE_EVAL_MAX_CONCURRENCY":"${PROBE_EVAL_MAX_CONCURRENCY}","PROBE_TASK_MAX_CONCURRENCY":"${PROBE_TASK_MAX_CONCURRENCY}","ROLLOUT_FALLBACK_URL":"${ROLLOUT_FALLBACK_URL}","ROLLOUT_FALLBACK_MODEL":"${ROLLOUT_FALLBACK_MODEL}","HF_CHECKPOINT":"${HF_CHECKPOINT}","REWARD_METRICS_LOG":"${LOG_DIR}/reward_metrics.jsonl","N_SAMPLES_PER_PROMPT":"${N_SAMPLES_PER_PROMPT}","MEMORY_RL_MAX_AGENT_TURNS":"${MEMORY_RL_MAX_AGENT_TURNS}","MEMORY_RL_TASK_VERSION":"${MEMORY_RL_TASK_VERSION}","MEMORY_RL_RETRIEVE_TASK_VERSION":"${MEMORY_RL_RETRIEVE_TASK_VERSION}","MEMORY_RL_APPLY_MODE":"${MEMORY_RL_APPLY_MODE}","MEMORY_RL_LLM_API_URL":"${FROZEN_MODEL_URL}","MEMORY_RL_LLM_MODEL":"${FROZEN_MODEL_NAME}","MEMORY_RL_LLM_MAX_TOKENS":"${MEMORY_RL_LLM_MAX_TOKENS}","MEMORY_RL_LLM_TIMEOUT":"${MEMORY_RL_LLM_TIMEOUT}","MEMORY_RL_GENERATE_TIMEOUT":"${MEMORY_RL_GENERATE_TIMEOUT}","MEMORY_RL_USE_SGLANG_TOOL_PARSER":"0"}}
 JSON_EOF
 
     # 启动 SwanLab 监控
@@ -823,10 +913,13 @@ JSON_EOF
         "cd ${PROJECT_ROOT}/scripts && \
          export PYTHONPATH=${MEGATRON_ROOT}:${LLM_GATEWAY_PARENT}:${LLM_GATEWAY_ROOT} && \
          export SWANLAB_API_KEY=${SWANLAB_API_KEY:-BVQaRTEEZKWC9p3iF5MMp} && \
+         export N_SAMPLES_PER_PROMPT=${N_SAMPLES_PER_PROMPT} && \
+         export MEMORY_RL_TASK_VERSION=${MEMORY_RL_TASK_VERSION} && \
          nohup python3 swanlab_monitor.py \
             --log-dir ${LOG_DIR} \
             --task-version ${MEMORY_RL_TASK_VERSION} \
             --poll-interval 5.0 \
+            --gpu-poll-interval 30.0 \
             > ${LOG_DIR}/swanlab_monitor.log 2>&1 &" || true
 
     # 将完整训练命令写入容器内脚本文件 (避免 bash -c 嵌套引号问题)
@@ -870,6 +963,9 @@ ray job submit --address=http://127.0.0.1:${RAY_DASHBOARD_PORT} \\
     --save ${CKPT_DIR} \\
     --save-interval 20 \\
     --prompt-data ${TRAIN_DATA} \\
+    --eval-data ${EVAL_DATA} \\
+    --eval-interval 10 \\
+    --eval-prompt-data ingest_val ${EVAL_DATA} \\
     --input-key prompt \\
     --metadata-key metadata \\
     --apply-chat-template \\
@@ -878,20 +974,20 @@ ray job submit --address=http://127.0.0.1:${RAY_DASHBOARD_PORT} \\
     --num-rollout ${NUM_ROLLOUT} \\
     --rollout-batch-size ${ROLLOUT_BATCH_SIZE} \\
     --n-samples-per-prompt ${N_SAMPLES_PER_PROMPT} \\
-    --rollout-max-response-len 10000 \\
-    --rollout-max-prompt-len 20000 \\
+    --rollout-max-response-len 64000 \\
+    --rollout-max-prompt-len 64000 \\
     --rollout-temperature 1.0 \\
     --global-batch-size ${GLOBAL_BATCH_SIZE} \\
     --balance-data \\
     --tensor-model-parallel-size 4 \\
     --sequence-parallel \\
     --pipeline-model-parallel-size 2 \\
-    --context-parallel-size 1 \\
+    --context-parallel-size 2 \\
     --recompute-granularity full \\
     --recompute-method uniform \\
     --recompute-num-layers 1 \\
+    --max-tokens-per-gpu 1024 \\
     --use-dynamic-batch-size \\
-    --max-tokens-per-gpu 30000 \\
     --advantage-estimator grpo \\
     --use-kl-loss \\
     --kl-loss-coef 0.005 \\
@@ -908,13 +1004,15 @@ ray job submit --address=http://127.0.0.1:${RAY_DASHBOARD_PORT} \\
     --weight-decay 0.1 \\
     --adam-beta1 0.9 \\
     --adam-beta2 0.98 \\
-    --sglang-mem-fraction-static 0.5 \\
+    --sglang-mem-fraction-static ${SGLANG_MEM_FRACTION_STATIC} \\
+    --sglang-tool-call-parser qwen3_coder \\
+    --sglang-reasoning-parser qwen3 \\
     --sglang-disable-custom-all-reduce \\
     --sglang-disable-cuda-graph \\
     --sglang-watchdog-timeout 1200 \\
     --sglang-router-request-timeout-secs 300 \\
     --no-check-for-nan-in-loss-and-grad \\
-    --distributed-timeout-minutes 60 \\
+    --distributed-timeout-minutes 120 \\
     --no-load-optim \\
     --no-load-rng \\
     --finetune \\
@@ -980,6 +1078,9 @@ main() {
 
     # Step 0.5: 清理所有节点 GPU 进程
     clear_gpu_processes
+
+    # Step 0.6: 释放 head 节点 SGLang router 端口（已不再指定固定 router port，跳过）
+    # clear_router_port
 
     # Step 1: Docker 配置
     if [ "${SKIP_DOCKER}" = true ]; then

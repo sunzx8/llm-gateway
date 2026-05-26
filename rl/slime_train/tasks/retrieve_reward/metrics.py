@@ -1,5 +1,8 @@
 """JSONL logging helpers for Retrieve reward metrics and rollout records."""
 
+from logging import Logger
+
+
 from __future__ import annotations
 
 import json
@@ -12,7 +15,7 @@ try:  # pragma: no cover - fallback for direct script-style imports
 except ImportError:  # pragma: no cover
     from parser import strip_think_wrapper, try_parse_json
 
-logger = logging.getLogger(__name__)
+logger: Logger = logging.getLogger(__name__)
 
 
 def _reward_metrics_log_path() -> str:

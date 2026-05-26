@@ -653,6 +653,23 @@ class ConsolidateT2AgentLoopTask(BaseContextTask):
         self.extra_kwargs = kwargs
         self.result_extra: dict[str, Any] = {}
 
+    def _normalize_fs_path(self, path: Any) -> str:
+        """Normalize paths copied from displayed trees such as `filesystem/...`."""
+        p = str(path or "").strip()
+        while p.startswith("./"):
+            p = p[2:]
+        p = p.lstrip("/")
+        if p == "filesystem":
+            return ""
+        if p.startswith("filesystem/"):
+            return p[len("filesystem/"):]
+        return p
+
+    def _normalize_fs_paths(self, paths: Any) -> Any:
+        if isinstance(paths, list):
+            return [self._normalize_fs_path(p) for p in paths]
+        return self._normalize_fs_path(paths)
+
     # ------------------------------------------------------------------
     # 主 run（BaseContextTask 钩子）
     # ------------------------------------------------------------------
@@ -737,9 +754,12 @@ class ConsolidateT2AgentLoopTask(BaseContextTask):
 
             for tc in response.tool_calls:
                 if tc.name == "finish":
-                    finish_summary = (tc.arguments or {}).get("changes_summary", "") or (
-                        tc.arguments or {}
-                    ).get("summary", "")
+                    finish_summary = (
+                        (tc.arguments or {}).get("result")
+                        or (tc.arguments or {}).get("changes_summary")
+                        or (tc.arguments or {}).get("summary")
+                        or ""
+                    )
                     step_trace["tool_calls"].append({
                         "tool": "finish",
                         "arguments": tc.arguments,
@@ -952,7 +972,10 @@ class ConsolidateT2AgentLoopTask(BaseContextTask):
     def _read_current_index(self) -> str:
         """读取当前 .meta/index.md 内容。"""
         try:
-            content = self.fs.read_file(".meta/index.md")
+            if hasattr(self.fs, "read_index"):
+                _, content = self.fs.read_index()
+            else:
+                content = self.fs.read_file(".meta/index.md")
             if isinstance(content, str) and content.startswith("ERROR"):
                 return "(no index yet)"
             return content or "(no index yet)"
@@ -971,8 +994,8 @@ class ConsolidateT2AgentLoopTask(BaseContextTask):
     ) -> str:
         try:
             # === File System ===
-            if tool_name == "fs_read":
-                path = args.get("path", "")
+            if tool_name in {"fs_read", "fs_read_file", "read_file"}:
+                path = self._normalize_fs_path(args.get("path", ""))
                 if not path:
                     return "ERROR: fs_read requires 'path'"
                 return self.fs.read_file(path)
@@ -990,7 +1013,7 @@ class ConsolidateT2AgentLoopTask(BaseContextTask):
                     return "ERROR: fs_grep requires 'pattern'"
                 results = self.fs.grep(
                     pattern=pattern,
-                    paths=args.get("paths", "."),
+                    paths=self._normalize_fs_paths(args.get("paths", ".")),
                     context_lines=int(args.get("context_lines", 2)),
                     max_matches=int(args.get("max_matches", 50)),
                     case_insensitive=args.get("case_insensitive", True),
@@ -998,7 +1021,7 @@ class ConsolidateT2AgentLoopTask(BaseContextTask):
                 )
                 return str(results)
             elif tool_name == "fs_read_lines":
-                path = args.get("path", "")
+                path = self._normalize_fs_path(args.get("path", ""))
                 if not path:
                     return "ERROR: fs_read_lines requires 'path'"
                 return self.fs.read_lines(
@@ -1007,21 +1030,21 @@ class ConsolidateT2AgentLoopTask(BaseContextTask):
                     end=int(args["end"]) if args.get("end") is not None else None,
                 )
             elif tool_name == "fs_write":
-                path = args.get("path", "")
+                path = self._normalize_fs_path(args.get("path", ""))
                 if not path:
                     return "ERROR: fs_write requires 'path'"
                 result = self.fs.write_file(path, args.get("content", ""))
                 stats["fs_writes"] = stats.get("fs_writes", 0) + 1
                 return result
             elif tool_name == "fs_append":
-                path = args.get("path", "")
+                path = self._normalize_fs_path(args.get("path", ""))
                 if not path:
                     return "ERROR: fs_append requires 'path'"
                 result = self.fs.append_file(path, args.get("content", ""))
                 stats["fs_updates"] = stats.get("fs_updates", 0) + 1
                 return result
             elif tool_name == "fs_delete":
-                path = args.get("path", "")
+                path = self._normalize_fs_path(args.get("path", ""))
                 if not path:
                     return "ERROR: fs_delete requires 'path'"
                 return self.fs.delete_file(path)
@@ -1038,8 +1061,15 @@ class ConsolidateT2AgentLoopTask(BaseContextTask):
             elif tool_name == "vec_search":
                 collection = args.get("collection", "")
                 query = args.get("query", "")
-                if not collection or not query:
-                    return "ERROR: vec_search requires 'collection' and 'query'"
+                if not query:
+                    return "ERROR: vec_search requires 'query'"
+                if not collection:
+                    results = await self.vec.search_all(
+                        query=query,
+                        top_k=int(args.get("top_k", 10)),
+                        metadata_filter=args.get("filter") or None,
+                    )
+                    return str(results)
                 results = await self.vec.search(
                     collection=collection,
                     query=query,

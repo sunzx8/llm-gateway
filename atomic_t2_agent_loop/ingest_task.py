@@ -333,6 +333,23 @@ class IngestT2AgentLoopTask(BaseContextTask):
         # 跨 session 累积的 finish summary
         self._session_extractions: list[str] = []
 
+    def _normalize_fs_path(self, path: Any) -> str:
+        """Normalize paths copied from displayed trees such as `filesystem/...`."""
+        p = str(path or "").strip()
+        while p.startswith("./"):
+            p = p[2:]
+        p = p.lstrip("/")
+        if p == "filesystem":
+            return ""
+        if p.startswith("filesystem/"):
+            return p[len("filesystem/"):]
+        return p
+
+    def _normalize_fs_paths(self, paths: Any) -> Any:
+        if isinstance(paths, list):
+            return [self._normalize_fs_path(p) for p in paths]
+        return self._normalize_fs_path(paths)
+
     # ------------------------------------------------------------------
     # 主 run（BaseContextTask 钩子）
     # ------------------------------------------------------------------
@@ -580,7 +597,7 @@ class IngestT2AgentLoopTask(BaseContextTask):
                     return "ERROR: fs_grep requires 'pattern'"
                 results = self.fs.grep(
                     pattern=pattern,
-                    paths=args.get("paths", "."),
+                    paths=self._normalize_fs_paths(args.get("paths", ".")),
                     context_lines=2,
                     max_matches=20,
                     case_insensitive=True,
@@ -595,13 +612,13 @@ class IngestT2AgentLoopTask(BaseContextTask):
                 return str(results)[:3000]
 
             if tool_name == "fs_read_file":
-                path = args.get("path", "")
+                path = self._normalize_fs_path(args.get("path", ""))
                 if not path:
                     return "ERROR: fs_read_file requires 'path'"
                 return self.fs.read_file(path)[:3000]
 
             if tool_name == "fs_read_lines":
-                path = args.get("path", "")
+                path = self._normalize_fs_path(args.get("path", ""))
                 if not path:
                     return "ERROR: fs_read_lines requires 'path'"
                 return self.fs.read_lines(
@@ -614,11 +631,21 @@ class IngestT2AgentLoopTask(BaseContextTask):
                 return self.fs.tree(int(args.get("max_depth", 3)))
 
             if tool_name == "vec_search":
-                results = await self.vec.search(
-                    collection=args["collection"],
-                    query=args["query"],
-                    top_k=int(args.get("top_k", 5)),
-                )
+                query = args.get("query", "")
+                if not query:
+                    return "ERROR: vec_search requires 'query'"
+                collection = args.get("collection", "")
+                if not collection:
+                    results = await self.vec.search_all(
+                        query=query,
+                        top_k=int(args.get("top_k", 5)),
+                    )
+                else:
+                    results = await self.vec.search(
+                        collection=collection,
+                        query=query,
+                        top_k=int(args.get("top_k", 5)),
+                    )
                 return str(results)[:3000]
 
             if tool_name == "vec_search_all":
@@ -644,7 +671,7 @@ class IngestT2AgentLoopTask(BaseContextTask):
 
             # ---- Write ----
             if tool_name == "fs_write":
-                path = args.get("path", "")
+                path = self._normalize_fs_path(args.get("path", ""))
                 content = args.get("content", "")
                 if not path:
                     return "ERROR: fs_write requires 'path'"
@@ -653,7 +680,7 @@ class IngestT2AgentLoopTask(BaseContextTask):
                 return result
 
             if tool_name == "fs_append":
-                path = args.get("path", "")
+                path = self._normalize_fs_path(args.get("path", ""))
                 content = args.get("content", "")
                 if not path:
                     return "ERROR: fs_append requires 'path'"
@@ -662,7 +689,7 @@ class IngestT2AgentLoopTask(BaseContextTask):
                 return result
 
             if tool_name == "fs_update_line":
-                path = args.get("path", "")
+                path = self._normalize_fs_path(args.get("path", ""))
                 line_number = int(args.get("line_number", 0))
                 new_content = args.get("new_content", "")
                 if not path or line_number <= 0:
@@ -680,7 +707,7 @@ class IngestT2AgentLoopTask(BaseContextTask):
                 return result
 
             if tool_name == "fs_update_meta":
-                path = args.get("path", "")
+                path = self._normalize_fs_path(args.get("path", ""))
                 meta_json = args.get("meta_json", "")
                 if not path or not meta_json:
                     return "ERROR: fs_update_meta requires 'path' and 'meta_json'"
@@ -713,21 +740,31 @@ class IngestT2AgentLoopTask(BaseContextTask):
                     self.vec.create_collection(collection)
                 except Exception:
                     pass
-                added = 0
+                # 适配 schema（items=[{text, metadata}, ...]）→ 后端契约
+                # VectorStore.add(collection, texts: list[str], metadatas: list[dict] | None, ...)
+                texts: list[str] = []
+                metadatas: list[dict] = []
                 for item in items:
-                    text = item.get("text", "") if isinstance(item, dict) else ""
+                    if not isinstance(item, dict):
+                        continue
+                    text = item.get("text", "")
                     if not text:
                         continue
-                    metadata = item.get("metadata") if isinstance(item, dict) else None
-                    try:
-                        await self.vec.add(
-                            collection=collection,
-                            text=text,
-                            metadata=metadata if isinstance(metadata, dict) else None,
-                        )
-                        added += 1
-                    except Exception as e:
-                        logger.warning("vec.add failed: %s", e)
+                    metadata = item.get("metadata")
+                    texts.append(text)
+                    metadatas.append(metadata if isinstance(metadata, dict) else {})
+                if not texts:
+                    return f"added 0/{len(items)} entries to '{collection}' (no valid text)"
+                added = 0
+                try:
+                    ids = await self.vec.add(
+                        collection=collection,
+                        texts=texts,
+                        metadatas=metadatas,
+                    )
+                    added = len(ids) if isinstance(ids, list) else len(texts)
+                except Exception as e:
+                    logger.warning("vec.add failed: %s", e)
                 stats["vec_added"] = stats.get("vec_added", 0) + added
                 return f"added {added}/{len(items)} entries to '{collection}'"
 
@@ -806,7 +843,10 @@ class IngestT2AgentLoopTask(BaseContextTask):
     def _read_index_md(self) -> str:
         """读取 .meta/index.md 作为提示词级目录。"""
         try:
-            content = self.fs.read_file(".meta/index.md")
+            if hasattr(self.fs, "read_index"):
+                _, content = self.fs.read_index()
+            else:
+                content = self.fs.read_file(".meta/index.md")
             if isinstance(content, str) and content.startswith("ERROR"):
                 return "(empty memory — no index available)"
             return content or "(empty memory — no index available)"

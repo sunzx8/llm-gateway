@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import importlib
 import json
+import logging
 import os
 import re
 import sys
@@ -29,6 +31,7 @@ from llm_gateway.rl.slime_train.memory_rl.tool_executors import EnvToolExecutor
 from utils.memory_llm_interface import LLMResponse, ToolCall
 
 TOKENIZER = None
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -66,8 +69,19 @@ async def custom_generate(args, sample, sampling_params: dict) -> Any:
     prompt = getattr(sample, "prompt", "")
     metadata = getattr(sample, "metadata", {}) if isinstance(getattr(sample, "metadata", {}), dict) else {}
     task = _task_from_metadata(metadata)
-    tools = metadata.get("tools") if isinstance(metadata.get("tools"), list) else None
     max_turns = int(os.environ.get("MEMORY_RL_MAX_AGENT_TURNS", getattr(args, "memory_rl_max_agent_turns", 4)))
+
+    # Resolve tools: metadata["tools"] may be a list of tool-name strings OR full OpenAI dicts.
+    # Always resolve to full OpenAI tool schema dicts via get_tool_schemas(task).
+    from llm_gateway.rl.slime_train.memory_rl.tool_schemas import get_tool_schemas
+    raw_tools = metadata.get("tools") if isinstance(metadata.get("tools"), list) else None
+    if raw_tools and all(isinstance(t, str) for t in raw_tools):
+        # metadata only has tool names — fetch full schemas from registry
+        tools = get_tool_schemas(task) or None
+    elif raw_tools and all(isinstance(t, dict) for t in raw_tools):
+        tools = raw_tools
+    else:
+        tools = get_tool_schemas(task) or None
 
     # Initialize tool schemas for type-aware parameter parsing
     from llm_gateway.rl.slime_train.memory_rl.response_parser import set_tool_schemas
@@ -116,9 +130,14 @@ async def custom_generate(args, sample, sampling_params: dict) -> Any:
                 loss_mask.extend([1] * len(assistant_ids))
                 current_text += assistant_text
 
-                # Parse tool calls via /parse_function_call endpoint
+                # Parse tool calls via /parse_function_call endpoint;
+                # 若 router 不支持 (典型: slime 自带 sglang router 返回 404)，
+                # _post_parse_function_call 会返回 None，此时降级到本地正则。
                 parse_result = await _post_parse_function_call(args, assistant_text, tools)
-                calls = _parse_function_call_response(parse_result)
+                if parse_result is None:
+                    calls, _ = parse_tool_calls_response(assistant_text)
+                else:
+                    calls = _parse_function_call_response(parse_result)
             else:
                 # --- Local regex parsing path (original) ---
                 output = await _post_generate(args, current_text, sampling_params)
@@ -158,9 +177,6 @@ async def custom_generate(args, sample, sampling_params: dict) -> Any:
             loss_mask.extend([0] * len(observation_ids))
             current_text += observation_text
 
-            if use_server_parser:
-                pass  # /generate path: current_text already updated above, observation_text appended below
-
     stop_reason = "finish" if any(call.get("tool") == "finish" for call in all_calls) else "no_tool_calls" if not all_calls else "max_turns"
     response_payload = {
         "tool_calls": all_calls,
@@ -193,6 +209,7 @@ async def _custom_generate_task_loop(args, sample, sampling_params: dict, tokeni
     )
     loaded = await _load_snapshot_for_task_loop(session, metadata, adapter)
     step_index = metadata.get("step_index")
+    post_consolidate_snapshot: dict[str, Any] | None = None
     try:
         if task == "ingest":
             ingest_extras: dict[str, Any] = {
@@ -217,6 +234,21 @@ async def _custom_generate_task_loop(args, sample, sampling_params: dict, tokeni
                 [],
                 extras=consolidate_extras,
             )
+            try:
+                post_consolidate_snapshot = await asyncio.to_thread(
+                    session.save_env_snapshot,
+                    loaded.env,
+                    traj_id=str(metadata.get("traj_id") or loaded.traj_id),
+                    source_snapshot_id=str(metadata.get("snapshot_id") or loaded.snapshot_id),
+                    subdir=os.environ.get("MEMORY_RL_ROLLOUT_SNAPSHOT_DIR", "rollout_snapshots"),
+                    meta={
+                        "phase": "post_consolidate_rollout",
+                        "session_id": metadata.get("session_id", ""),
+                        "step_index": step_index,
+                    },
+                )
+            except Exception as exc:  # noqa: BLE001 - keep rollout usable; reward can fall back to replay
+                logger.warning("failed to persist post-consolidate rollout snapshot: %s", exc)
         elif task == "retrieve":
             query = _retrieve_query_from_metadata(metadata)
             retrieve_extra: dict[str, Any] = {}
@@ -233,6 +265,8 @@ async def _custom_generate_task_loop(args, sample, sampling_params: dict, tokeni
             raise RuntimeError(f"task_loop custom_generate does not support task={task!r}")
     finally:
         await _release_loaded_env(loaded)
+        # 主动释放 session 的快照索引缓存以回收内存
+        session._snapshot_index = None
 
     adapter.sync_observations_from_messages([])
     task_final_output = step.task_result.final_output or step.task_result.finish_summary or ""
@@ -244,6 +278,7 @@ async def _custom_generate_task_loop(args, sample, sampling_params: dict, tokeni
         "agentic_trace": adapter.trace,
         "stop_reason": stop_reason,
         "retrieved_context": retrieved_context,
+        "post_consolidate_snapshot": post_consolidate_snapshot,
         "task_result": {
             "task_name": step.task_name,
             "finish_reason": step.task_result.finish_reason,
@@ -296,6 +331,9 @@ class SlimeTaskLoopLLM:
         tools: list[dict] | None = None,
     ) -> LLMResponse:
         self.sync_observations_from_messages(messages)
+        from llm_gateway.rl.slime_train.memory_rl.response_parser import set_tool_schemas
+
+        set_tool_schemas(tools)
 
         sampling_params = dict(self.sampling_params)
         if temperature is not None:
@@ -322,27 +360,45 @@ class SlimeTaskLoopLLM:
             self.loss_mask.extend([1] * len(ids))
             self._last_rendered = rendered + text
 
-            # Parse tool calls via /parse_function_call endpoint
+            # Parse tool calls via /parse_function_call endpoint;
+            # router 不支持时降级到本地正则，避免整条 trajectory 因 404 报废。
             parse_result = await _post_parse_function_call(self.args, text, tools)
-            normalized_calls = _parse_function_call_response(parse_result)
-            self._call_index += len(normalized_calls)
-            self.all_calls.extend(normalized_calls)
-            self.trace.append({
-                "turn": len(self.trace),
-                "content": text,
-                "tool_calls": normalized_calls,
-                "observations": [],
-            })
+            if parse_result is None:
+                # Local regex fallback
+                local_tool_calls = _parse_generated_tool_calls(text, call_offset=self._call_index)
+                self._call_index += len(local_tool_calls)
+                normalized_calls = [
+                    {"tool": tc.name, "arguments": tc.arguments, "id": tc.id}
+                    for tc in local_tool_calls
+                ]
+                self.all_calls.extend(normalized_calls)
+                self.trace.append({
+                    "turn": len(self.trace),
+                    "content": text,
+                    "tool_calls": normalized_calls,
+                    "observations": [],
+                })
+                tool_calls = local_tool_calls
+            else:
+                normalized_calls = _parse_function_call_response(parse_result)
+                self._call_index += len(normalized_calls)
+                self.all_calls.extend(normalized_calls)
+                self.trace.append({
+                    "turn": len(self.trace),
+                    "content": text,
+                    "tool_calls": normalized_calls,
+                    "observations": [],
+                })
 
-            # Convert to ToolCall objects for LLMResponse
-            tool_calls = [
-                ToolCall(
-                    id=str(c.get("id") or f"slime_task_loop_call_{self._call_index - len(normalized_calls) + i}"),
-                    name=c["tool"],
-                    arguments=c.get("arguments", {}),
-                )
-                for i, c in enumerate(normalized_calls)
-            ]
+                # Convert to ToolCall objects for LLMResponse
+                tool_calls = [
+                    ToolCall(
+                        id=str(c.get("id") or f"slime_task_loop_call_{self._call_index - len(normalized_calls) + i}"),
+                        name=c["tool"],
+                        arguments=c.get("arguments", {}),
+                    )
+                    for i, c in enumerate(normalized_calls)
+                ]
         else:
             # --- Local regex parsing path (original) ---
             rendered = _render_chat_for_task_loop(system, messages, tools, self.tokenizer)
@@ -422,27 +478,25 @@ class SlimeTaskLoopLLM:
 
 
 def _use_native_task_loop_rollout(task: str, metadata: dict[str, Any]) -> bool:
-    if not metadata.get("snapshot_id"):
-        return False
+    # NOTE: an empty snapshot_id is the trajectory-first-step case after
+    # build_mixed_data.shift_pre_ingest_snapshot. _load_snapshot_for_task_loop
+    # below transparently constructs a freshly-reset MemoryEnv for it.
     if os.environ.get("MEMORY_RL_TRAIN_TASK_LOOP", "1") == "0":
         return False
     if os.environ.get("MEMORY_RL_APPLY_MODE", "").strip().lower() != "task_loop":
         return False
     task_version = os.environ.get("MEMORY_RL_TASK_VERSION", "")
     if task == "retrieve":
+        # retrieve still needs a real snapshot to query against.
+        if not metadata.get("snapshot_id"):
+            return False
         return task_version in {"t2_agent_loop", "atomic_code_t2"}
     return task in {"ingest", "consolidate"} and task_version == "t2_agent_loop"
 
 
 async def _load_snapshot_for_task_loop(session: SnapshotSession, metadata: dict[str, Any], llm: Any):
-    import asyncio as _asyncio
-
-    return await _asyncio.to_thread(
-        session.load,
-        traj_id=metadata.get("traj_id") or None,
-        snapshot_id=metadata["snapshot_id"],
-        llm=llm,
-    )
+    from llm_gateway.rl.slime_train.memory_rl.env_acquire import acquire_loaded_env
+    return await acquire_loaded_env(metadata, session, llm=llm)
 
 
 async def _release_loaded_env(loaded) -> None:
@@ -463,13 +517,23 @@ async def _post_generate(args, text: str, sampling_params: dict) -> dict[str, An
             return json.loads(body)
 
 
+_PARSE_FN_CALL_DISABLED: bool = False  # 进程级软开关：一旦 router 不支持，自动降级到本地正则
+
+
 async def _post_parse_function_call(
     args,
     text: str,
     tools: list[dict[str, Any]],
-) -> dict[str, Any]:
+) -> dict[str, Any] | None:
     """Call SGLang /parse_function_call endpoint to parse tool calls from
     generated text using the server-side qwen3_coder parser.
+
+    Returns ``None`` (instead of raising) when the endpoint is unavailable
+    (404 / 405 / network error / timeout) or when the parser has been
+    permanently disabled for this process. Callers MUST treat ``None`` as
+    "fall back to local regex parsing"; this avoids killing entire
+    trajectories when the router (e.g. slime's sglang router) does not
+    expose ``/parse_function_call``.
 
     Args:
         args: slime args (contains router address info)
@@ -479,7 +543,12 @@ async def _post_parse_function_call(
     Returns a dict with:
       - "normal_text": non-tool-call text content
       - "calls": list of {"name": str, "parameters": str(JSON)} or []
+    Or ``None`` to signal "use local fallback".
     """
+    global _PARSE_FN_CALL_DISABLED
+    if _PARSE_FN_CALL_DISABLED:
+        return None
+
     url = _router_parse_function_call_url(args)
     timeout = aiohttp.ClientTimeout(total=int(os.environ.get("MEMORY_RL_GENERATE_TIMEOUT", "300")))
 
@@ -490,12 +559,35 @@ async def _post_parse_function_call(
         "tools": tools,
     }
 
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        async with session.post(url, json=payload) as resp:
-            body = await resp.text()
-            if resp.status != 200:
-                raise RuntimeError(f"sglang parse_function_call http {resp.status}: {body[:500]}")
-            return json.loads(body)
+    try:
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(url, json=payload) as resp:
+                body = await resp.text()
+                if resp.status == 200:
+                    return json.loads(body)
+                # 4xx / 5xx：判定 endpoint 不可用，永久降级，避免每条 trajectory 都打一次然后失败
+                if resp.status in (404, 405, 501):
+                    _PARSE_FN_CALL_DISABLED = True
+                    logger.warning(
+                        "sglang /parse_function_call endpoint unavailable on router (%s, http=%s); "
+                        "falling back to local regex parser for the rest of this run.",
+                        url,
+                        resp.status,
+                    )
+                    return None
+                # 其他状态码当作瞬时错误，单次降级，不全局禁用
+                logger.warning(
+                    "sglang /parse_function_call returned http=%s: %s; falling back locally for this turn.",
+                    resp.status,
+                    body[:200],
+                )
+                return None
+    except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
+        logger.warning(
+            "sglang /parse_function_call network error (%s); falling back locally for this turn.",
+            exc,
+        )
+        return None
 
 
 def _parse_function_call_response(parse_result: dict[str, Any]) -> list[dict[str, Any]]:
@@ -526,14 +618,17 @@ def _parse_function_call_response(parse_result: dict[str, Any]) -> list[dict[str
 
 
 def _use_sglang_tool_parser() -> bool:
-    """Check if we should use SGLang's server-side /parse_function_call
-    endpoint instead of local regex parsing.
+    """Whether to use SGLang's server-side /parse_function_call endpoint.
 
-    Enable by setting: MEMORY_RL_USE_SGLANG_TOOL_PARSER=1
-    This requires the SGLang server to be started with --tool-call-parser qwen3_coder
-    (via slime's --sglang-tool-call-parser qwen3_coder passthrough).
+    NOTE: slime's sglang router does NOT expose ``/parse_function_call`` (it is
+    only available on the underlying single-engine SGLang HTTP server). Hitting
+    the router with this path returns 404 and kills the entire trajectory, so
+    we **default to the local regex parser** (Qwen3 Coder XML + JSON + GLM
+    fallbacks in ``response_parser.py``).
 
-    Flow: /generate -> get raw text -> /parse_function_call -> structured calls
+    The env switch ``MEMORY_RL_USE_SGLANG_TOOL_PARSER=1`` is kept as an opt-in
+    escape hatch (e.g. when pointing directly at a single sglang worker), but
+    the default is now ``0``.
     """
     return os.environ.get("MEMORY_RL_USE_SGLANG_TOOL_PARSER", "0") == "1"
 
