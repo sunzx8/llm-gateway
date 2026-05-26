@@ -16,7 +16,6 @@ from llm_gateway.rl.slime_train.memory_rl.paths import ensure_workspace_paths
 ensure_workspace_paths(__file__)
 
 from llm_gateway.rl.rl_env.snapshot_session import SnapshotSession
-from llm_gateway.rl.slime_train.memory_rl.env_acquire import acquire_loaded_env
 from llm_gateway.rl.slime_train.memory_rl.probes import (
     average_probe_score,
     context_diff_score,
@@ -99,6 +98,8 @@ async def reward_func(args, sample, **kwargs) -> float:
 
     response = sample.response or ""
     metadata = sample.metadata if isinstance(sample.metadata, dict) else {}
+    split = str(metadata.get("_memory_rl_split") or ("eval" if metadata.get("_memory_rl_evaluation") else "train"))
+    is_eval = 1.0 if split == "eval" else 0.0
     try:
         reward, sub = await compute_single_reward_async(response, metadata)
     except Exception as exc:
@@ -124,6 +125,8 @@ async def reward_func(args, sample, **kwargs) -> float:
         try:
             record = {
                 "timestamp": _time.time(),
+                "split": split,
+                "is_eval": is_eval,
                 "reward": reward,
                 "sub_rewards": sub,
                 "response": response,
@@ -133,6 +136,7 @@ async def reward_func(args, sample, **kwargs) -> float:
                     "traj_id": metadata.get("traj_id", ""),
                     "snapshot_id": metadata.get("snapshot_id", ""),
                     "session_id": metadata.get("session_id", ""),
+                    "split": split,
                     "probes_count": len(metadata.get("probes", [])),
                 },
             }
@@ -144,6 +148,8 @@ async def reward_func(args, sample, **kwargs) -> float:
         try:
             metrics_record = {
                 "timestamp": _time.time(),
+                "split": split,
+                "is_eval": is_eval,
                 "prompt_uid": prompt_uid,
                 "r_total": reward,
                 "r_format": sub.get("r_format", 0),
@@ -204,18 +210,16 @@ async def compute_single_reward_async(response: str, metadata: dict) -> tuple[fl
             post_snapshot_path = str(post_snapshot.get("snapshot_path", "") or "")
             post_snapshot_id = str(post_snapshot.get("snapshot_id", "") or "")
 
-    if (calls or task_loop) and probes:
+    if (calls or task_loop) and metadata.get("snapshot_id") and probes:
         session = _get_snapshot_session()
         traj_id = metadata.get("traj_id") or None
-        source_snapshot_id = metadata.get("snapshot_id") or ""
-        # NOTE: empty source_snapshot_id is the trajectory-first-step case
-        # produced by build_mixed_data.shift_pre_ingest_snapshot. We start
-        # from a freshly-reset MemoryEnv via acquire_loaded_env in that case.
+        source_snapshot_id = metadata["snapshot_id"]
 
         async def _load_before():
-            return await acquire_loaded_env(
-                {"snapshot_id": source_snapshot_id, "traj_id": traj_id},
-                session,
+            return await asyncio.to_thread(
+                session.load,
+                traj_id=traj_id,
+                snapshot_id=source_snapshot_id,
             )
 
         before_evals = await evaluate_probe_set(None, probes, env_factory=_load_before)
@@ -236,9 +240,10 @@ async def compute_single_reward_async(response: str, metadata: dict) -> tuple[fl
             after_evals = await evaluate_probe_set(None, probes, env_factory=_load_after_post)
         else:
             # Fallback for old rollouts without persisted post snapshot: replay tool calls.
-            loaded = await acquire_loaded_env(
-                {"snapshot_id": source_snapshot_id, "traj_id": traj_id},
-                session,
+            loaded = await asyncio.to_thread(
+                session.load,
+                traj_id=traj_id,
+                snapshot_id=source_snapshot_id,
             )
             try:
                 await loaded.env.apply_consolidate_tool_calls(

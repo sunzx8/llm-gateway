@@ -63,7 +63,12 @@ class SnapshotSession:
             enable_git: Whether restored env FS should initialise git.
         """
         self.data_root = data_root
-        self.tmp_base = tmp_base or os.path.join(data_root, "_env_tmp")
+        env_tmp_base = (
+            os.environ.get("MEMORY_RL_ENV_TMP_BASE")
+            or os.environ.get("MEMORY_RL_ENV_BASE_DIR")
+            or os.environ.get("RL_ENV_BASE_DIR")
+        )
+        self.tmp_base = tmp_base or env_tmp_base or os.path.join(data_root, "_env_tmp")
         self.task_version = task_version
         self.backend = backend
         self.enable_git = enable_git
@@ -126,6 +131,9 @@ class SnapshotSession:
 
         if llm is None:
             llm = _build_default_llm_from_env()
+
+        if embedder is None:
+            embedder = _build_default_embedder()
 
         cbsnap_path = os.path.join(
             self.data_root, "snapshots", traj_id, f"{snapshot_id}.cbsnap"
@@ -239,6 +247,9 @@ class SnapshotSession:
         if llm is None:
             llm = _build_default_llm_from_env()
 
+        if embedder is None:
+            embedder = _build_default_embedder()
+
         env_dir = self._get_or_create_env_dir(tid, sid)
         env = MemoryEnv(
             llm=llm,
@@ -348,10 +359,69 @@ def _build_default_llm_from_env() -> Any | None:
         "base_url": _openai_base_url(api_url),
         "api_key": os.environ.get("MEMORY_RL_LLM_API_KEY") or os.environ.get("OPENAI_API_KEY") or "none",
         "temperature": float(os.environ.get("MEMORY_RL_LLM_TEMPERATURE", "0")),
-        "max_tokens": int(os.environ.get("MEMORY_RL_LLM_MAX_TOKENS", "1024")),
+        "max_tokens": int(os.environ.get("MEMORY_RL_LLM_MAX_TOKENS", "65536")),
         "timeout": float(os.environ.get("MEMORY_RL_LLM_TIMEOUT", "300")),
         "max_retries": int(os.environ.get("MEMORY_RL_LLM_MAX_RETRIES", "1")),
     })
+
+
+def _build_default_embedder() -> Any | None:
+    """Build an EmbeddingInterface for RL env from env vars or config.yaml.
+
+    优先级：
+    1. 环境变量 MEMORY_RL_EMBEDDING_* 系列
+    2. config.yaml 中的 memory_config.embedding 配置
+    3. 硬编码的 bge-m3 默认配置（兜底）
+    """
+    try:
+        from utils.memory_llm_interface import EmbeddingInterface
+    except Exception as exc:  # pragma: no cover
+        logger.warning("无法导入 EmbeddingInterface: %s", exc)
+        return None
+
+    # 优先从环境变量构造
+    env_base_url = os.environ.get("MEMORY_RL_EMBEDDING_BASE_URL") or os.environ.get("EMBEDDING_BASE_URL")
+    env_model = os.environ.get("MEMORY_RL_EMBEDDING_MODEL") or os.environ.get("EMBEDDING_MODEL")
+    if env_base_url and env_model:
+        config = {
+            "provider": "openai_compat",
+            "model": env_model,
+            "base_url": env_base_url,
+            "api_key": os.environ.get("MEMORY_RL_EMBEDDING_API_KEY") or os.environ.get("EMBEDDING_API_KEY") or "EMPTY",
+            "batch_size": int(os.environ.get("MEMORY_RL_EMBEDDING_BATCH_SIZE", "64")),
+            "dimensions": None,
+            "timeout": float(os.environ.get("MEMORY_RL_EMBEDDING_TIMEOUT", "120")),
+            "max_retries": int(os.environ.get("MEMORY_RL_EMBEDDING_MAX_RETRIES", "3")),
+        }
+        logger.info("_build_default_embedder: 从环境变量构造 (model=%s, base_url=%s)", env_model, env_base_url)
+        return EmbeddingInterface(config)
+
+    # 尝试从 config.yaml 读取
+    try:
+        from config.loader import get_config
+        cfg = get_config()
+        embedding_config = cfg.memory_config.embedding.model_dump()
+        logger.info(
+            "_build_default_embedder: 从 config.yaml 加载 (model=%s, base_url=%s)",
+            embedding_config.get("model"), embedding_config.get("base_url"),
+        )
+        return EmbeddingInterface(embedding_config)
+    except Exception:
+        pass
+
+    # 硬编码兜底（与 config.yaml 中当前配置保持一致）
+    fallback_config = {
+        "provider": "openai_compat",
+        "model": "bge-m3",
+        "api_key": "EMPTY",
+        "base_url": "http://81.70.50.154:8082/v1",
+        "batch_size": 64,
+        "dimensions": None,
+        "timeout": 120.0,
+        "max_retries": 3,
+    }
+    logger.warning("_build_default_embedder: 使用硬编码兜底配置 (bge-m3)")
+    return EmbeddingInterface(fallback_config)
 
 
 def _openai_base_url(url: str) -> str:
@@ -401,4 +471,4 @@ class LoadedEnv:
         return self.env.graph  # type: ignore[return-value]
 
 
-__all__ = ["SnapshotSession", "LoadedEnv"]
+__all__ = ["SnapshotSession", "LoadedEnv", "_build_default_embedder"]

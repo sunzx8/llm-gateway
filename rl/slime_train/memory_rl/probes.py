@@ -217,25 +217,50 @@ def signed_probe_accuracy_delta(before: list[dict[str, Any]], after: list[dict[s
     return max(-1.0, min(1.0, probe_accuracy(after) - probe_accuracy(before)))
 
 
-def headroom_after_score(before: list[dict[str, Any]], after: list[dict[str, Any]]) -> float:
-    """Score improvement normalized by remaining headroom: (after-before)/(1-before+eps).
+def headroom_after_score(
+    before: list[dict[str, Any]],
+    after: list[dict[str, Any]],
+    *,
+    improvable_threshold: float = 0.95,
+    saturated_penalty_weight: float = 1.0,
+) -> float:
+    """Headroom-normalized improvement over still-improvable probes.
 
-    Designed to replace the absolute ``r_after_score`` term: probes that were
-    already correct (before≈1) contribute ~0 regardless of after; probes that
-    were wrong (before≈0) and got fixed contribute ~1. Output clipped to
-    [-1, 1] (sign preserved on regressions, but small).
+    Only probes with ``before_score < improvable_threshold`` contribute to the
+    positive/negative normalized headroom term, so a few genuinely fixable
+    probes are not diluted by many already-solved probes. Probes that were
+    already saturated (``before_score >= threshold``) contribute only a raw
+    regression penalty via ``min(0, after-before)``.
+
+    This keeps the anti-regression behavior for already-correct probes without
+    giving them free positive reward for simply staying correct. Output is
+    clipped to ``[-1, 1]``.
     """
     if not after:
         return 0.0
+
     eps = 1e-3
-    contribs: list[float] = []
+    improvable_contribs: list[float] = []
+    saturated_penalties: list[float] = []
+
     for i, after_eval in enumerate(after):
         before_score = float(before[i].get("score", 0.0)) if i < len(before) else 0.0
         after_score = float(after_eval.get("score", 0.0))
-        head = max(eps, 1.0 - before_score)
-        contribs.append((after_score - before_score) / head)
-    avg = sum(contribs) / len(contribs)
-    return max(-1.0, min(1.0, avg))
+        delta = after_score - before_score
+
+        if before_score < improvable_threshold:
+            head = max(eps, 1.0 - before_score)
+            normalized = delta / head
+            improvable_contribs.append(max(-1.0, min(1.0, normalized)))
+        else:
+            saturated_penalties.append(min(0.0, delta))
+
+    positive_headroom = sum(improvable_contribs) / len(improvable_contribs) if improvable_contribs else 0.0
+    preservation_penalty = (
+        sum(saturated_penalties) / len(saturated_penalties) if saturated_penalties else 0.0
+    )
+    score = positive_headroom + saturated_penalty_weight * preservation_penalty
+    return max(-1.0, min(1.0, score))
 
 
 def context_diff_score(

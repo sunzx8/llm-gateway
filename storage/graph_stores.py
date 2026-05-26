@@ -487,7 +487,7 @@ class AgePgGraphStore(GraphStoreBase):
         schema: 用户独立的 PostgreSQL schema 名称（如 'u_user_42'）。
     """
 
-    def __init__(self, backend: Any, schema: str):
+    def __init__(self, backend: Any, schema: str, embedding_interface=None):
         from .pg_store_backend import _check_pg_available, _safe_graph_name, _check_safe_ident
         _check_pg_available()
         _check_safe_ident(schema, "schema")
@@ -502,6 +502,7 @@ class AgePgGraphStore(GraphStoreBase):
         self.graph_name = _safe_graph_name(schema)
         self._graph_ready = False
         self._edge_counter = 0
+        self.embedder = embedding_interface
 
     # ------------------------------------------------------------------
     # 序列化 / 反序列化

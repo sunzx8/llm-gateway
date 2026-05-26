@@ -57,7 +57,7 @@ def _import_object(path: str):
     return getattr(module, attr)
 
 
-async def custom_generate(args, sample, sampling_params: dict) -> Any:
+async def custom_generate(args, sample, sampling_params: dict, evaluation: bool = False) -> Any:
     """Slime ``--custom-generate-function-path`` entrypoint for agentic rollout.
 
     It keeps slime's default rollout pipeline but replaces the single generation
@@ -68,6 +68,9 @@ async def custom_generate(args, sample, sampling_params: dict) -> Any:
     tokenizer = _get_tokenizer(args)
     prompt = getattr(sample, "prompt", "")
     metadata = getattr(sample, "metadata", {}) if isinstance(getattr(sample, "metadata", {}), dict) else {}
+    metadata.setdefault("_memory_rl_split", "eval" if evaluation else "train")
+    metadata["_memory_rl_evaluation"] = bool(evaluation)
+    sample.metadata = metadata
     task = _task_from_metadata(metadata)
     max_turns = int(os.environ.get("MEMORY_RL_MAX_AGENT_TURNS", getattr(args, "memory_rl_max_agent_turns", 4)))
 

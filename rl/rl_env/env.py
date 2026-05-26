@@ -22,6 +22,7 @@ import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
+from utils.memory_llm_interface import EmbeddingInterface
 
 from llm_gateway.rl.rl_env._models import Event, EventType, TaskResult, ToolCall
 from llm_gateway.rl.rl_env.scorer import BaseScorer, ScoreResult
@@ -100,7 +101,7 @@ class MemoryEnv:
         task_version: str = "atomic_code_t2",
     ) -> None:
         self.llm = llm
-        self.embedder = embedder
+        self.embedder: EmbeddingInterface | None = embedder
         self.backend = (backend or "memory").lower()
         if self.backend not in _VALID_BACKENDS:
             raise ValueError(
@@ -109,17 +110,26 @@ class MemoryEnv:
         self.enable_git = enable_git
         self.max_turns = max_turns
         self.task_version = task_version
-        self.snapshot_backend: SnapshotBackend = (
-            snapshot_backend or InMemorySnapshotBackend()
-        )
-
-        # base_dir 生命周期：env 内部建的 temp dir 在 close 时清理；外部指定的不动
+        # base_dir 生命周期：env 内部建的 temp dir 在 close 时清理；外部指定的不动。
+        # 训练时可通过 MEMORY_RL_ENV_BASE_DIR/RL_ENV_BASE_DIR 把默认 workdir
+        # 从 /tmp 挪到本次 run 的 outputs 目录，避免多机长跑把系统 /tmp 打满。
         self._owns_base_dir = base_dir is None
         if base_dir is None:
+            env_base_parent = os.environ.get("MEMORY_RL_ENV_BASE_DIR") or os.environ.get("RL_ENV_BASE_DIR")
+            if env_base_parent:
+                os.makedirs(env_base_parent, exist_ok=True)
             base_dir = tempfile.mkdtemp(
                 prefix=f"rl_env_{datetime.now().strftime('%Y%m%d_%H%M%S')}_",
+                dir=env_base_parent or None,
             )
         self.base_dir = base_dir
+
+        if snapshot_backend is None:
+            snapshot_root = os.environ.get("MEMORY_RL_SNAPSHOT_ROOT") or os.environ.get("RL_ENV_SNAPSHOT_ROOT")
+            if snapshot_root:
+                os.makedirs(snapshot_root, exist_ok=True)
+            snapshot_backend = InMemorySnapshotBackend(snapshot_root=snapshot_root)
+        self.snapshot_backend: SnapshotBackend = snapshot_backend
 
         # 由 reset() 填充
         self.id: str = ""
@@ -174,7 +184,7 @@ class MemoryEnv:
             schema = _user_id_to_schema(user_id)
             pg.ensure_user_schema_sync(schema)
             vec: "VectorStoreBase" = PgVectorStore(pg, schema=schema, embedder=self.embedder)
-            graph: "GraphStoreBase" = AgePgGraphStore(pg, schema=schema)
+            graph: "GraphStoreBase" = AgePgGraphStore(pg, schema=schema, embedding_interface=self.embedder)
             info = {"backend": "pg", "schema": schema}
         else:
             vec = VectorStore(embedding_interface=self.embedder)

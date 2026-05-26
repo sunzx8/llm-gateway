@@ -135,6 +135,8 @@ class InMemorySnapshotBackend(SnapshotBackend):
 
     def __init__(self, snapshot_root: str | None = None) -> None:
         if snapshot_root is None:
+            snapshot_root = os.environ.get("MEMORY_RL_SNAPSHOT_ROOT") or os.environ.get("RL_ENV_SNAPSHOT_ROOT")
+        if snapshot_root is None:
             snapshot_root = tempfile.mkdtemp(prefix="rl_env_snap_")
         os.makedirs(snapshot_root, exist_ok=True)
         self.snapshot_root = snapshot_root

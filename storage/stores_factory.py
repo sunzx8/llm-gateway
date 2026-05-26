@@ -86,7 +86,7 @@ def make_stores(
                 return _memory_store_cache[user_id]
             fs = FileSystemStore(fs_path, enable_git=storage_config.memory_fs.enable_git)
             vec = VectorStore(embedder)
-            graph = GraphStore()
+            graph = GraphStore(embedding_interface=embedder)
             cached = (fs, vec, graph)
             _memory_store_cache[user_id] = cached
             logger.debug("make_stores: 创建并缓存 memory stores, user_id=%s", user_id)
@@ -107,7 +107,7 @@ def make_stores(
         pg.ensure_user_schema_sync(schema)
 
         vec = PgVectorStore(pg, schema=schema, embedder=embedder)
-        graph = AgePgGraphStore(pg, schema=schema)
+        graph = AgePgGraphStore(pg, schema=schema, embedding_interface=embedder)
         info["graph_name"] = graph.graph_name
         return fs, vec, graph
 

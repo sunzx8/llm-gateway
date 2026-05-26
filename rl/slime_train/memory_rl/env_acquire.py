@@ -31,7 +31,7 @@ from typing import Any
 
 from llm_gateway.rl.rl_env.env import MemoryEnv
 from llm_gateway.rl.rl_env.snapshot import InMemorySnapshotBackend
-from llm_gateway.rl.rl_env.snapshot_session import LoadedEnv, SnapshotSession
+from llm_gateway.rl.rl_env.snapshot_session import LoadedEnv, SnapshotSession, _build_default_embedder
 
 logger = logging.getLogger(__name__)
 
@@ -82,7 +82,7 @@ def _make_empty_env(*, traj_id: str, task_version: str, llm: Any | None) -> _Eph
 
     env = MemoryEnv(
         llm=llm,
-        embedder=None,
+        embedder=_build_default_embedder(),
         base_dir=env_dir,
         backend="memory",
         enable_git=False,
